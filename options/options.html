@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>CatBlocker – Options</title>
+    <link rel="stylesheet" href="options.css" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+</head>
+<body>
+<header>
+    <h1>CatBlocker – Options</h1>
+    <p>Control behavior, whitelist domains, and manage your cat gallery.</p>
+</header>
+
+<section class="card">
+    <h2>General</h2>
+    <label class="row">
+        <span>Enabled</span>
+        <input type="checkbox" id="enabled" />
+    </label>
+
+    <label class="row">
+        <span>Intensity</span>
+        <select id="intensity">
+            <option value="gentle">Gentle</option>
+            <option value="balanced">Balanced</option>
+            <option value="aggressive">Aggressive</option>
+        </select>
+    </label>
+</section>
+
+<section class="card">
+    <h2>Whitelist</h2>
+    <div class="row">
+        <input type="text" id="domainInput" placeholder="example.com" />
+        <button id="addDomain">Add</button>
+    </div>
+    <ul id="domainList"></ul>
+</section>
+
+<section class="card">
+    <h2>Cat Gallery</h2>
+    <p>By default the extension uses bundled cat images in <code>cats/</code>. You can also add custom URLs (loaded at runtime).</p>
+    <div class="row">
+        <input type="url" id="catUrl" placeholder="https://example.com/mycat.jpg" />
+        <button id="addCatUrl">Add</button>
+    </div>
+    <ul id="catList"></ul>
+    <button id="clearCatUrls">Clear custom URLs</button>
+</section>
+
+<footer>
+    <button id="save">Save</button>
+    <span id="status"></span>
+</footer>
+
+<script src="options.js"></script>
+</body>
+</html>
