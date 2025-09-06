@@ -1,51 +1,76 @@
-// content.js
-// Replaces detected ad nodes with cat images; observes DOM mutations.
+// content.js — CatBlocker content script
+// Uses globals from common.js (no imports/exports).
 
-import { chooseSelectors, pickCatSrc, hostnameOf } from "./common.js";
-
-let settings = {
-    enabled: true,
-    intensity: "aggressive",
-    whitelist: []
-};
-
-let replacedOnThisPage = 0;
+let settings = { enabled: true, intensity: "aggressive", whitelist: [] };
 let observer = null;
+let replacedOnThisPage = 0;
 
-// Load settings on start
+/* ---------------------------------------------------------
+   Injects CSS rules once to avoid overflow warnings
+--------------------------------------------------------- */
+function injectCatblockerStylesOnce() {
+    if (document.getElementById("catblocker-style")) return;
+    const style = document.createElement("style");
+    style.id = "catblocker-style";
+    style.textContent = `
+    /* Opt-out of View Transitions for our nodes */
+    .catblocker-container, .catblocker-container * {
+      view-transition-name: none !important;
+    }
+
+    /* Ensure media never paint outside their box */
+    .catblocker-container img,
+    .catblocker-container video,
+    .catblocker-container canvas {
+      display: block !important;
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      overflow: clip !important;
+      overflow-clip-margin: content-box;
+      contain: paint;
+    }
+
+    .catblocker-container {
+      contain: layout paint style !important;
+      isolation: isolate !important;
+      will-change: contents;
+    }
+  `;
+    document.documentElement.appendChild(style);
+}
+
+/* ---------------------------------------------------------
+   Initialization
+--------------------------------------------------------- */
 (async function init() {
     try {
         const resp = await chrome.runtime.sendMessage({ type: "CATBLOCKER_GET_SETTINGS" });
-        if (resp?.ok && resp.settings) {
-            settings = resp.settings;
-        }
+        if (resp?.ok && resp.settings) settings = resp.settings;
     } catch {}
 
     const host = hostnameOf(location.href);
-    if (!settings.enabled || settings.whitelist?.includes(host)) {
-        return; // do nothing on whitelisted or disabled
+    if (!settings.enabled || (settings.whitelist || []).includes(host)) {
+        return; // disabled or whitelisted
     }
 
     startReplacement();
 })();
 
+/* ---------------------------------------------------------
+   Start replacement logic
+--------------------------------------------------------- */
 function startReplacement() {
-    // Early scan at document_start and repeat at DOMContentLoaded
-    scanAndReplace({ reason: "initial" });
-    document.addEventListener("DOMContentLoaded", () => scanAndReplace({ reason: "domcontentloaded" }), { once: true });
+    injectCatblockerStylesOnce();
 
-    // Observe dynamic changes
-    observer = new MutationObserver((mutations) => {
-        let shouldRescan = false;
-        for (const m of mutations) {
-            if (m.addedNodes && m.addedNodes.length) { shouldRescan = true; break; }
-            if (m.type === "attributes") { shouldRescan = true; break; }
-        }
-        if (shouldRescan) {
-            // Debounced
-            if (scanAndReplace._t) cancelAnimationFrame(scanAndReplace._t);
-            scanAndReplace._t = requestAnimationFrame(() => scanAndReplace({ reason: "mutation" }));
-        }
+    // First scans
+    scanAndReplace();
+    document.addEventListener("DOMContentLoaded", () => scanAndReplace(), { once: true });
+
+    // Observe DOM mutations
+    observer = new MutationObserver(() => {
+        if (scanAndReplace._t) cancelAnimationFrame(scanAndReplace._t);
+        scanAndReplace._t = requestAnimationFrame(() => scanAndReplace());
     });
 
     observer.observe(document.documentElement, {
@@ -55,58 +80,50 @@ function startReplacement() {
         attributeFilter: ["style", "class", "id", "src", "data-ad", "data-advertisement"]
     });
 
-    // Listen for manual trigger
+    // Manual trigger from popup/context menu
     chrome.runtime.onMessage.addListener((msg) => {
-        if (msg?.type === "CATBLOCKER_FORCE_SCAN") {
-            scanAndReplace({ reason: "manual" });
-        }
+        if (msg?.type === "CATBLOCKER_FORCE_SCAN") scanAndReplace();
     });
 }
 
-function scanAndReplace({ reason }) {
+/* ---------------------------------------------------------
+   Scan & Replace
+--------------------------------------------------------- */
+async function scanAndReplace() {
     const selectors = chooseSelectors(settings.intensity);
-    let found = 0, replaced = 0;
+    const tasks = [];
 
-    try {
-        // iframes first: try to neutralize ad iframes (same-origin only for content, otherwise replace node)
-        const iframeCandidates = document.querySelectorAll("iframe[src*='ad'], iframe[id*='ad'], iframe[name*='ad']");
-        iframeCandidates.forEach(ifr => {
-            found++;
-            replaceNodeWithCat(ifr);
-            replaced++;
-        });
+    // Replace ad iframes
+    document.querySelectorAll("iframe[src*='ad'], iframe[id*='ad'], iframe[name*='ad']")
+        .forEach(el => tasks.push(replaceNodeWithCat(el)));
 
-        // generic containers
-        const nodes = document.querySelectorAll(selectors.join(","));
-        nodes.forEach(node => {
-            // Skip if already processed
-            if (node.__catblockerProcessed) return;
+    // Replace ad containers
+    document.querySelectorAll(selectors.join(",")).forEach(node => {
+        if (node.__catblockerProcessed) return;
+        const r = node.getBoundingClientRect();
+        if (r.width < 80 || r.height < 50) return; // skip tiny
+        tasks.push(replaceNodeWithCat(node));
+    });
 
-            // Heuristic: visible and bigger than small icon
-            const rect = node.getBoundingClientRect();
-            if (rect.width < 80 || rect.height < 50) return;
+    const count = tasks.length;
+    if (!count) return;
 
-            found++;
-            replaceNodeWithCat(node);
-            replaced++;
-        });
+    await Promise.allSettled(tasks);
+    replacedOnThisPage += count;
 
-        if (replaced > 0) {
-            replacedOnThisPage += replaced;
-            chrome.runtime.sendMessage({ type: "CATBLOCKER_ADD_COUNT", amount: replaced }).catch(() => {});
-        }
-    } catch (e) {
-        // noop
-    }
+    chrome.runtime.sendMessage({ type: "CATBLOCKER_ADD_COUNT", amount: count }).catch(() => {});
 }
 
-function replaceNodeWithCat(node) {
-    const catUrl = pickCatSrc();
+/* ---------------------------------------------------------
+   Replace node with cat container
+--------------------------------------------------------- */
+async function replaceNodeWithCat(node) {
+    node.__catblockerProcessed = true;
 
-    // Create container preserving size
+    const catUrl = await pickCatSrc();
     const rect = node.getBoundingClientRect();
-    const width = Math.max(100, Math.floor(rect.width)) || 300;
-    const height = Math.max(80, Math.floor(rect.height)) || 250;
+    const w = Math.max(100, Math.floor(rect.width)) || 300;
+    const h = Math.max(80, Math.floor(rect.height)) || 250;
 
     const container = document.createElement("div");
     container.className = "catblocker-container";
@@ -116,8 +133,8 @@ function replaceNodeWithCat(node) {
     align-items: center !important;
     justify-content: center !important;
     overflow: hidden !important;
-    width: ${width}px !important;
-    height: ${height}px !important;
+    width: ${w}px !important;
+    height: ${h}px !important;
     max-width: 100% !important;
     border-radius: 8px !important;
     background: #0003 !important;
@@ -127,13 +144,6 @@ function replaceNodeWithCat(node) {
     const img = document.createElement("img");
     img.src = catUrl;
     img.alt = "Ad replaced by a cat 😺";
-    img.style.cssText = `
-    all: initial;
-    display: block !important;
-    width: 100% !important;
-    height: 100% !important;
-    object-fit: cover !important;
-  `;
 
     const badge = document.createElement("div");
     badge.textContent = "CatBlocker";
@@ -150,15 +160,11 @@ function replaceNodeWithCat(node) {
     border-radius: 6px !important;
   `;
 
-    container.appendChild(img);
-    container.appendChild(badge);
+    container.append(img, badge);
 
-    // Replace node
-    node.__catblockerProcessed = true;
     try {
         node.replaceWith(container);
     } catch {
-        // Fallback if replaceWith not allowed
         node.innerHTML = "";
         node.appendChild(container);
     }
