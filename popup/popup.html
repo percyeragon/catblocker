@@ -3,55 +3,76 @@
 <head>
     <meta charset="UTF-8" />
     <title>CatBlocker</title>
-    <link rel="stylesheet" href="popup.css" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-<header>
-    <img src="../icons/icon128.png" alt="CatBlocker" />
-    <h1>CatBlocker</h1>
-</header>
-
-<main>
-    <div class="row">
-        <label class="switch">
+<div class="shell">
+    <header class="header">
+        <div class="logo">
+            <img src="../icons/icon-128.png" alt="CatBlocker logo" />
+        </div>
+        <div class="titles">
+            <h1>CatBlocker</h1>
+            <p>Replace ads with cats. Meow.</p>
+        </div>
+        <label class="switch" title="Enable/Disable">
             <input type="checkbox" id="toggleEnabled" />
             <span class="slider"></span>
         </label>
-        <span id="enabledLabel">Enabled</span>
-    </div>
+    </header>
 
-    <div class="row">
-        <label for="intensity">Intensity</label>
-        <select id="intensity">
-            <option value="gentle">Gentle</option>
-            <option value="balanced">Balanced</option>
-            <option value="aggressive">Aggressive</option>
-        </select>
-    </div>
+    <section class="card">
+        <div class="row between">
+            <span class="label">Status</span>
+            <span id="enabledLabel" class="badge">Disabled</span>
+        </div>
 
-    <div class="stats">
+        <div class="intensity">
+            <span class="label">Intensity</span>
+            <div class="segmented" role="tablist" aria-label="Intensity">
+                <button class="seg" data-value="gentle" role="tab" aria-selected="false">Gentle</button>
+                <button class="seg" data-value="balanced" role="tab" aria-selected="true">Balanced</button>
+                <button class="seg" data-value="aggressive" role="tab" aria-selected="false">Aggressive</button>
+            </div>
+            <select id="intensity" class="sr-only" aria-hidden="true">
+                <option value="gentle">Gentle</option>
+                <option value="balanced" selected>Balanced</option>
+                <option value="aggressive">Aggressive</option>
+            </select>
+        </div>
+    </section>
+
+    <section class="stats card">
         <div class="stat">
             <div class="value" id="sessionCount">0</div>
-            <div class="label">Replaced (this page)</div>
+            <div class="caption">This page</div>
         </div>
+        <div class="divider"></div>
         <div class="stat">
             <div class="value" id="globalCount">0</div>
-            <div class="label">Replaced (all time)</div>
+            <div class="caption">All time</div>
         </div>
-    </div>
+    </section>
 
-    <div class="actions">
-        <button id="replaceNow">Replace on this page</button>
-        <button id="openOptions">Options</button>
-    </div>
+    <section class="card">
+        <div class="row domain">
+            <span class="domain-icon" aria-hidden="true">🌐</span>
+            <input type="text" id="hostname" class="domain-input" readonly />
+            <button id="toggleWhitelist" class="chip" title="Toggle whitelist">Whitelist</button>
+        </div>
+        <div class="actions">
+            <button id="replaceNow" class="btn primary">Replace now</button>
+            <button id="openOptions" class="btn">Options</button>
+        </div>
+    </section>
 
-    <div class="row small">
-        <input type="text" id="hostname" readonly />
-        <button id="toggleWhitelist">Whitelist domain</button>
-    </div>
-</main>
+    <footer class="footer">
+        <span class="hint">Tip: Use the context menu to trigger a scan.</span>
+    </footer>
+</div>
 
+<div id="toast" role="status" aria-live="polite"></div>
 <script src="popup.js"></script>
 </body>
 </html>
