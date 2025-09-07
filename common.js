@@ -38,6 +38,6 @@ function chooseSelectors(intensity) {
 
 function pickCatSrc() {
     // Choose a bundled cat image
-    const idx = Math.floor(Math.random() * 5) + 1; // 1..5
+    const idx = Math.floor(Math.random() * 16) + 1; // 1..16
     return chrome.runtime.getURL(`cats/cat${idx}.jpg`);
 }
