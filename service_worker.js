@@ -5,7 +5,8 @@ const DEFAULT_SETTINGS = {
     enabled: true,
     intensity: "aggressive", // 'gentle' | 'balanced' | 'aggressive'
     whitelist: [],           // hostnames to skip
-    counter: 0               // global replaced count
+    counter: 0,              // global replaced count
+    theme: "light"         // 'light' | 'dark' | 'system'
 };
 
 chrome.runtime.onInstalled.addListener(async () => {

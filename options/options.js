@@ -4,7 +4,8 @@ const DEFAULTS = {
     enabled: true,
     intensity: "balanced",
     whitelist: [],
-    customCatUrls: []
+    customCatUrls: [],
+    theme: "light" // 'light' | 'dark' | 'system'
 };
 
 function toast(msg){
@@ -101,6 +102,11 @@ async function load(){
     const data = await chrome.storage.sync.get(null);
     const s = { ...DEFAULTS, ...data };
 
+    // Theme
+    applyTheme(s.theme);
+    const dm = document.getElementById("darkMode");
+    if (dm) dm.checked = s.theme === "dark";
+
     // Toggle + Intensity
     document.getElementById("enabled").checked = !!s.enabled;
     document.getElementById("intensity").value = s.intensity || "balanced";
@@ -132,6 +138,15 @@ function bind(){
     document.getElementById("enabled").addEventListener("change", async (e) => {
         await chrome.storage.sync.set({ enabled: e.target.checked });
         setStatus("Saved ✓");
+    });
+
+    // Dark mode toggle (overrides system pref when ON)
+    const dm = document.getElementById("darkMode");
+    dm?.addEventListener("change", async (e) => {
+        const theme = e.target.checked ? "dark" : "light";
+        await chrome.storage.sync.set({ theme });
+        applyTheme(theme);
+        setStatus("Theme saved ✓");
     });
 
     // Intensity segmented + hidden select
@@ -232,7 +247,8 @@ async function importSettings(e){
             enabled: typeof obj.enabled === "boolean" ? obj.enabled : DEFAULTS.enabled,
             intensity: ["gentle","balanced","aggressive"].includes(obj.intensity) ? obj.intensity : DEFAULTS.intensity,
             whitelist: Array.isArray(obj.whitelist) ? obj.whitelist.map(normalizeDomain).filter(Boolean) : DEFAULTS.whitelist,
-            customCatUrls: Array.isArray(obj.customCatUrls) ? obj.customCatUrls.filter(isValidUrl) : DEFAULTS.customCatUrls
+            customCatUrls: Array.isArray(obj.customCatUrls) ? obj.customCatUrls.filter(isValidUrl) : DEFAULTS.customCatUrls,
+            theme: ["light","dark","system"].includes(obj.theme) ? obj.theme : DEFAULTS.theme
         };
         await chrome.storage.sync.set(next);
         await load();
@@ -248,6 +264,13 @@ async function resetDefaults(){
     await chrome.storage.sync.set({ ...DEFAULTS });
     await load();
     toast("Reset to defaults");
+}
+
+function applyTheme(theme){
+    const root = document.documentElement;
+    if (theme === "dark") root.setAttribute("data-theme", "dark");
+    else if (theme === "light") root.setAttribute("data-theme", "light");
+    else root.removeAttribute("data-theme"); // system
 }
 
 document.addEventListener("DOMContentLoaded", () => { bind(); load(); });

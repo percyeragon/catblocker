@@ -23,8 +23,16 @@ function syncIntensitySeg(value){
     if (sel) sel.value = value;
 }
 
+function applyTheme(theme){
+    const root = document.documentElement;
+    if (theme === "dark") root.setAttribute("data-theme", "dark");
+    else if (theme === "light") root.setAttribute("data-theme", "light");
+    else root.removeAttribute("data-theme"); // system/default
+}
+
 async function init(){
     const settings = await getSettings();
+    applyTheme(settings.theme);
 
     const toggle = document.getElementById("toggleEnabled");
     const enabledLabel = document.getElementById("enabledLabel");
