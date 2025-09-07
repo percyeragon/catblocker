@@ -125,9 +125,44 @@ h2 { margin: 0 0 10px; font-size: 16px; }
     background: var(--card); color: var(--text);
 }
 .chip .remove{
-    width: 18px; height: 18px; border-radius: 50%;
-    display:grid; place-items:center; border:1px solid var(--border);
-    cursor: pointer; background: transparent;
+    position: relative;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: transparent;
+    cursor: pointer;
+    /* zentrierte Zeichenfläche */
+    display: inline-block;
+    padding: 0;
+    line-height: 0;
+    font-size: 0;          /* Glyphen unsichtbar machen */
+}
+
+/* Das X als zwei perfekt mittige Balken */
+.chip .remove::before,
+.chip .remove::after{
+    content: "";
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 10px;           /* Länge der Balken */
+    height: 2px;           /* Dicke der Balken */
+    background: var(--muted);
+    border-radius: 1px;
+    transform: translate(-50%, -50%) rotate(45deg);
+}
+.chip .remove::after{
+    transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+/* Hover/Focus (ohne Größenänderung) */
+.chip .remove:hover{
+    background: var(--brand-weak);
+    border-color: var(--brand-weak);
+}
+.chip .remove:focus-visible{
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--brand-weak);
 }
 
 .gallery{
