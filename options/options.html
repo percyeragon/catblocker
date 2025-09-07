@@ -3,57 +3,96 @@
 <head>
     <meta charset="UTF-8" />
     <title>CatBlocker – Options</title>
-    <link rel="stylesheet" href="options.css" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="options.css" />
 </head>
 <body>
-<header>
-    <h1>CatBlocker – Options</h1>
-    <p>Control behavior, whitelist domains, and manage your cat gallery.</p>
-</header>
+<div class="shell">
+    <header class="header">
+        <div class="titles">
+            <h1>CatBlocker – Options</h1>
+            <p>Configure behavior, whitelist domains, and manage your cat gallery.</p>
+        </div>
+        <a class="btn subtle" id="backToPopup" title="Open popup">Open popup</a>
+    </header>
 
-<section class="card">
-    <h2>General</h2>
-    <label class="row">
-        <span>Enabled</span>
-        <input type="checkbox" id="enabled" />
-    </label>
+    <!-- General -->
+    <section class="card">
+        <h2>General</h2>
+        <div class="row">
+            <label class="switch">
+                <input type="checkbox" id="enabled" />
+                <span class="slider"></span>
+            </label>
+            <span class="label">Extension enabled</span>
+        </div>
 
-    <label class="row">
-        <span>Intensity</span>
-        <select id="intensity">
-            <option value="gentle">Gentle</option>
-            <option value="balanced">Balanced</option>
-            <option value="aggressive">Aggressive</option>
-        </select>
-    </label>
-</section>
+        <div class="row intensity">
+            <span class="label">Intensity</span>
+            <div class="segmented" role="tablist" aria-label="Intensity">
+                <button class="seg" data-value="gentle" role="tab" aria-selected="false">Gentle</button>
+                <button class="seg" data-value="balanced" role="tab" aria-selected="true">Balanced</button>
+                <button class="seg" data-value="aggressive" role="tab" aria-selected="false">Aggressive</button>
+            </div>
+            <select id="intensity" class="sr-only" aria-hidden="true">
+                <option value="gentle">Gentle</option>
+                <option value="balanced" selected>Balanced</option>
+                <option value="aggressive">Aggressive</option>
+            </select>
+        </div>
+    </section>
 
-<section class="card">
-    <h2>Whitelist</h2>
-    <div class="row">
-        <input type="text" id="domainInput" placeholder="example.com" />
-        <button id="addDomain">Add</button>
-    </div>
-    <ul id="domainList"></ul>
-</section>
+    <!-- Whitelist -->
+    <section class="card">
+        <h2>Whitelist</h2>
+        <p class="hint">Domains on the whitelist are ignored by CatBlocker.</p>
 
-<section class="card">
-    <h2>Cat Gallery</h2>
-    <p>By default the extension uses bundled cat images in <code>cats/</code>. You can also add custom URLs (loaded at runtime).</p>
-    <div class="row">
-        <input type="url" id="catUrl" placeholder="https://example.com/mycat.jpg" />
-        <button id="addCatUrl">Add</button>
-    </div>
-    <ul id="catList"></ul>
-    <button id="clearCatUrls">Clear custom URLs</button>
-</section>
+        <div class="row addline">
+            <input type="text" id="domainInput" placeholder="example.com" inputmode="url" autocomplete="off" />
+            <button id="addDomain" class="btn">Add</button>
+        </div>
 
-<footer>
-    <button id="save">Save</button>
-    <span id="status"></span>
-</footer>
+        <div id="domainChips" class="chips"></div>
+        <div class="row right">
+            <button id="clearWhitelist" class="btn subtle">Clear whitelist</button>
+        </div>
+    </section>
 
+    <!-- Cat Gallery -->
+    <section class="card">
+        <h2>Cat Gallery</h2>
+        <p class="hint">
+            CatBlocker uses bundled images in <code>cats/</code>. Add custom image URLs to randomize from the web.
+        </p>
+
+        <div class="row addline">
+            <input type="url" id="catUrl" placeholder="https://example.com/mycat.jpg" autocomplete="off" />
+            <button id="addCatUrl" class="btn">Add</button>
+        </div>
+
+        <div id="catList" class="gallery"></div>
+        <div class="row right">
+            <button id="clearCatUrls" class="btn subtle">Clear custom URLs</button>
+        </div>
+    </section>
+
+    <!-- Data management -->
+    <section class="card">
+        <h2>Data</h2>
+        <div class="row wrap gap">
+            <button id="exportSettings" class="btn">Export settings</button>
+            <label for="importFile" class="btn">Import settings</label>
+            <input id="importFile" type="file" accept="application/json" class="sr-only" />
+            <button id="resetDefaults" class="btn danger">Reset to defaults</button>
+        </div>
+    </section>
+
+    <footer class="footer">
+        <span id="status" role="status" aria-live="polite"></span>
+    </footer>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
 <script src="options.js"></script>
 </body>
 </html>

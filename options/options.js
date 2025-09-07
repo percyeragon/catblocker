@@ -1,85 +1,253 @@
+// options.js — polished options page logic
+
 const DEFAULTS = {
     enabled: true,
-    intensity: "aggressive",
+    intensity: "balanced",
     whitelist: [],
     customCatUrls: []
 };
 
-async function load() {
-    const data = await chrome.storage.sync.get(null);
-    const s = { ...DEFAULTS, ...data };
+function toast(msg){
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(() => t.classList.remove("show"), 1400);
+}
+function setStatus(msg){ const s = document.getElementById("status"); s.textContent = msg; setTimeout(()=> s.textContent="", 1600); }
 
-    document.getElementById("enabled").checked = !!s.enabled;
-    document.getElementById("intensity").value = s.intensity;
-
-    renderList("domainList", s.whitelist, removeDomain);
-    renderList("catList", s.customCatUrls, removeCatUrl, true);
+function normalizeDomain(v){
+    if (!v) return "";
+    v = v.trim();
+    v = v.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+    // remove path/query/hash
+    const cut = v.split("/")[0].split("?")[0].split("#")[0];
+    return cut.toLowerCase();
+}
+function isValidUrl(str){
+    try { new URL(str); return true; } catch { return false; }
 }
 
-function renderList(elId, arr, remover, isUrl = false) {
-    const el = document.getElementById(elId);
-    el.innerHTML = "";
-    arr.forEach((item, i) => {
-        const li = document.createElement("li");
-        const left = document.createElement(isUrl ? "a" : "span");
-        if (isUrl) { left.href = item; left.textContent = item; left.target = "_blank"; }
-        else { left.textContent = item; }
+/* ------------------------------ Rendering ------------------------------ */
+function renderWhitelist(list){
+    const wrap = document.getElementById("domainChips");
+    wrap.innerHTML = "";
+    list.forEach((domain, i) => {
+        const chip = document.createElement("div");
+        chip.className = "chip";
+        chip.innerHTML = `<span>${domain}</span>`;
         const btn = document.createElement("button");
-        btn.textContent = "Remove";
-        btn.addEventListener("click", () => remover(i));
-        li.append(left, btn);
-        el.appendChild(li);
+        btn.className = "remove";
+        btn.title = "Remove";
+        btn.textContent = "×";
+        btn.addEventListener("click", async () => {
+            const data = await chrome.storage.sync.get("whitelist");
+            const arr = Array.isArray(data.whitelist) ? data.whitelist : [];
+            arr.splice(i, 1);
+            await chrome.storage.sync.set({ whitelist: arr });
+            renderWhitelist(arr);
+            toast("Removed from whitelist");
+        });
+        chip.appendChild(btn);
+        wrap.appendChild(chip);
     });
 }
 
-async function removeDomain(index) {
-    const { whitelist = [] } = await chrome.storage.sync.get("whitelist");
-    whitelist.splice(index, 1);
-    await chrome.storage.sync.set({ whitelist });
-    renderList("domainList", whitelist, removeDomain);
+function renderGallery(urls){
+    const list = document.getElementById("catList");
+    list.innerHTML = "";
+    urls.forEach((url, i) => {
+        const tile = document.createElement("div");
+        tile.className = "tile";
+        const thumb = document.createElement("div");
+        thumb.className = "thumb";
+        const img = document.createElement("img");
+        img.loading = "lazy";
+        img.src = url;
+        img.alt = "Cat image";
+        img.onerror = () => { img.style.opacity = ".3"; img.title = "Failed to load"; };
+        thumb.appendChild(img);
+
+        const urlEl = document.createElement("div");
+        urlEl.className = "url";
+        urlEl.textContent = url;
+
+        const row = document.createElement("div");
+        row.className = "row";
+        const openBtn = document.createElement("a");
+        openBtn.className = "btn subtle";
+        openBtn.textContent = "Open";
+        openBtn.href = url;
+        openBtn.target = "_blank";
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "btn";
+        removeBtn.textContent = "Remove";
+        removeBtn.addEventListener("click", async () => {
+            const data = await chrome.storage.sync.get("customCatUrls");
+            const arr = Array.isArray(data.customCatUrls) ? data.customCatUrls : [];
+            arr.splice(i, 1);
+            await chrome.storage.sync.set({ customCatUrls: arr });
+            renderGallery(arr);
+            toast("Removed URL");
+        });
+
+        row.append(openBtn, removeBtn);
+        tile.append(thumb, urlEl, row);
+        list.appendChild(tile);
+    });
 }
 
-async function removeCatUrl(index) {
-    const { customCatUrls = [] } = await chrome.storage.sync.get("customCatUrls");
-    customCatUrls.splice(index, 1);
-    await chrome.storage.sync.set({ customCatUrls });
-    renderList("catList", customCatUrls, removeCatUrl, true);
+/* ------------------------------ Load & Bind ------------------------------ */
+async function load(){
+    const data = await chrome.storage.sync.get(null);
+    const s = { ...DEFAULTS, ...data };
+
+    // Toggle + Intensity
+    document.getElementById("enabled").checked = !!s.enabled;
+    document.getElementById("intensity").value = s.intensity || "balanced";
+    syncSeg(s.intensity || "balanced");
+
+    renderWhitelist(s.whitelist || []);
+    renderGallery(s.customCatUrls || []);
 }
 
-document.getElementById("addDomain").addEventListener("click", async () => {
+function syncSeg(value){
+    document.querySelectorAll(".segmented .seg").forEach(btn => {
+        const selected = btn.dataset.value === value;
+        btn.setAttribute("aria-selected", String(selected));
+    });
+    const sel = document.getElementById("intensity");
+    if (sel) sel.value = value;
+}
+
+/* ------------------------------ Events ------------------------------ */
+function bind(){
+    // Back link
+    document.getElementById("backToPopup").addEventListener("click", (e) => {
+        e.preventDefault();
+        // Opens the popup UI (best-effort)
+        chrome.action.openPopup?.();
+    });
+
+    // Enabled toggle
+    document.getElementById("enabled").addEventListener("change", async (e) => {
+        await chrome.storage.sync.set({ enabled: e.target.checked });
+        setStatus("Saved ✓");
+    });
+
+    // Intensity segmented + hidden select
+    document.querySelectorAll(".segmented .seg").forEach(btn => {
+        btn.addEventListener("click", async () => {
+            const v = btn.dataset.value;
+            syncSeg(v);
+            await chrome.storage.sync.set({ intensity: v });
+            setStatus("Saved ✓");
+        });
+    });
+    document.getElementById("intensity").addEventListener("change", async (e) => {
+        syncSeg(e.target.value);
+        await chrome.storage.sync.set({ intensity: e.target.value });
+        setStatus("Saved ✓");
+    });
+
+    // Add domain
+    document.getElementById("addDomain").addEventListener("click", addDomain);
+    document.getElementById("domainInput").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); addDomain(); }
+    });
+
+    // Clear whitelist
+    document.getElementById("clearWhitelist").addEventListener("click", async () => {
+        await chrome.storage.sync.set({ whitelist: [] });
+        renderWhitelist([]);
+        toast("Whitelist cleared");
+    });
+
+    // Add cat URL
+    document.getElementById("addCatUrl").addEventListener("click", addCatUrl);
+    document.getElementById("catUrl").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); addCatUrl(); }
+    });
+
+    // Clear custom URLs
+    document.getElementById("clearCatUrls").addEventListener("click", async () => {
+        await chrome.storage.sync.set({ customCatUrls: [] });
+        renderGallery([]);
+        toast("Custom URLs cleared");
+    });
+
+    // Export / Import / Reset
+    document.getElementById("exportSettings").addEventListener("click", exportSettings);
+    document.getElementById("importFile").addEventListener("change", importSettings);
+    document.getElementById("resetDefaults").addEventListener("click", resetDefaults);
+}
+
+async function addDomain(){
     const input = document.getElementById("domainInput");
-    const v = input.value.trim().replace(/^https?:\/\//, "").replace(/^www\./, "");
-    if (!v) return;
-    const { whitelist = [] } = await chrome.storage.sync.get("whitelist");
-    if (!whitelist.includes(v)) {
-        whitelist.push(v);
-        await chrome.storage.sync.set({ whitelist });
-        renderList("domainList", whitelist, removeDomain);
-    }
-    input.value = "";
-});
+    let v = normalizeDomain(input.value);
+    if (!v) { toast("Enter a domain"); return; }
 
-document.getElementById("addCatUrl").addEventListener("click", async () => {
+    const data = await chrome.storage.sync.get("whitelist");
+    const list = Array.isArray(data.whitelist) ? data.whitelist : [];
+    if (!list.includes(v)) list.push(v);
+    await chrome.storage.sync.set({ whitelist: list });
+    renderWhitelist(list);
+    input.value = "";
+    toast("Added to whitelist");
+}
+
+async function addCatUrl(){
     const input = document.getElementById("catUrl");
     const v = input.value.trim();
-    if (!v) return;
-    try { new URL(v); } catch { return; }
-    const { customCatUrls = [] } = await chrome.storage.sync.get("customCatUrls");
-    if (!customCatUrls.includes(v)) {
-        customCatUrls.push(v);
-        await chrome.storage.sync.set({ customCatUrls });
-        renderList("catList", customCatUrls, removeCatUrl, true);
-    }
+    if (!v || !isValidUrl(v)) { toast("Enter a valid URL"); return; }
+
+    const data = await chrome.storage.sync.get("customCatUrls");
+    const list = Array.isArray(data.customCatUrls) ? data.customCatUrls : [];
+    if (!list.includes(v)) list.push(v);
+    await chrome.storage.sync.set({ customCatUrls: list });
+    renderGallery(list);
     input.value = "";
-});
+    toast("URL added");
+}
 
-document.getElementById("save").addEventListener("click", async () => {
-    const enabled = document.getElementById("enabled").checked;
-    const intensity = document.getElementById("intensity").value;
-    await chrome.storage.sync.set({ enabled, intensity });
-    const status = document.getElementById("status");
-    status.textContent = "Saved ✓";
-    setTimeout(() => status.textContent = "", 1500);
-});
+async function exportSettings(){
+    const data = await chrome.storage.sync.get(null);
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "catblocker-settings.json";
+    a.click();
+    URL.revokeObjectURL(url);
+    toast("Settings exported");
+}
 
-load();
+async function importSettings(e){
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try{
+        const text = await file.text();
+        const obj = JSON.parse(text);
+        // keep only known keys
+        const next = {
+            enabled: typeof obj.enabled === "boolean" ? obj.enabled : DEFAULTS.enabled,
+            intensity: ["gentle","balanced","aggressive"].includes(obj.intensity) ? obj.intensity : DEFAULTS.intensity,
+            whitelist: Array.isArray(obj.whitelist) ? obj.whitelist.map(normalizeDomain).filter(Boolean) : DEFAULTS.whitelist,
+            customCatUrls: Array.isArray(obj.customCatUrls) ? obj.customCatUrls.filter(isValidUrl) : DEFAULTS.customCatUrls
+        };
+        await chrome.storage.sync.set(next);
+        await load();
+        toast("Settings imported");
+    } catch {
+        toast("Invalid settings file");
+    } finally {
+        e.target.value = "";
+    }
+}
+
+async function resetDefaults(){
+    await chrome.storage.sync.set({ ...DEFAULTS });
+    await load();
+    toast("Reset to defaults");
+}
+
+document.addEventListener("DOMContentLoaded", () => { bind(); load(); });
