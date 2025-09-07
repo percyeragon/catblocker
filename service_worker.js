@@ -5,6 +5,7 @@ const DEFAULT_SETTINGS = {
     enabled: true,
     intensity: "aggressive", // 'gentle' | 'balanced' | 'aggressive'
     whitelist: [],           // hostnames to skip
+    customCatUrls: [],       // user-provided image URLs
     counter: 0,              // global replaced count
     theme: "light"         // 'light' | 'dark' | 'system'
 };
