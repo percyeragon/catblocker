@@ -67,6 +67,10 @@ function startReplacement() {
     scanAndReplace();
     document.addEventListener("DOMContentLoaded", () => scanAndReplace(), { once: true });
 
+    // YouTube SPA navigations: hook into YT custom events when present
+    window.addEventListener('yt-navigate-finish', () => scanAndReplace());
+    window.addEventListener('yt-page-data-updated', () => scanAndReplace());
+
     // Observe DOM mutations
     observer = new MutationObserver(() => {
         if (scanAndReplace._t) cancelAnimationFrame(scanAndReplace._t);
@@ -77,7 +81,7 @@ function startReplacement() {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["style", "class", "id", "src", "data-ad", "data-advertisement"]
+        attributeFilter: ["style", "class", "id", "src", "data-ad", "data-advertisement", "aria-label", "role", "data-testid"]
     });
 
     // Manual trigger from popup/context menu
@@ -93,13 +97,45 @@ async function scanAndReplace() {
     const selectors = chooseSelectors(settings.intensity);
     const tasks = [];
 
+    // Heuristic: detect blocks labeled 'Sponsored'/'Anzeige' and replace their nearest container
+    try {
+        const labelCandidates = Array.from(document.querySelectorAll("*[aria-label], [data-testid], span, div, a"));
+        labelCandidates.forEach(el => {
+            if (el.__catblockerProcessed) return;
+            const txt = (el.textContent || "").trim().toLowerCase();
+            if (!txt) return;
+            if (["sponsored","promoted","anzeige","werbung","ad"].some(w => txt === w || txt.startsWith(w+" "))) {
+                const container = el.closest("article, li, ytd-rich-item-renderer, ytd-video-renderer, .feed-item, .card, .result, section, div");
+                if (container && !container.__catblockerProcessed) {
+                    tasks.push(replaceNodeWithCat(container));
+                }
+            }
+        });
+    } catch {}
+
     // Replace ad iframes
     document.querySelectorAll("iframe[src*='ad'], iframe[id*='ad'], iframe[name*='ad']")
         .forEach(el => tasks.push(replaceNodeWithCat(el)));
 
+    // YouTube specific: overlay and in-feed ads
+    try {
+        // In-feed and sidebar ad renderers
+        document.querySelectorAll("ytd-ad-slot-renderer, ytd-action-companion-ad-renderer, ytd-display-ad-renderer, ytd-promoted-sparkles-web-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-video-renderer").forEach(node => {
+            if (!node.__catblockerProcessed) tasks.push(replaceNodeWithCat(node));
+        });
+        // Video ad containers and overlays in the player
+        document.querySelectorAll(".video-ads, .ytp-ad-player-overlay, .ytp-ad-text, .ytp-ad-overlay-container, .ytp-ad-image-overlay, .ytp-ad-module").forEach(node => {
+            if (!node.__catblockerProcessed) tasks.push(replaceNodeWithCat(node));
+        });
+        // Ad countdown and skip button areas sometimes isolated
+        const skipParent = document.querySelector('.ytp-ad-skip-button-container, .ytp-ad-skip-button, .ytp-ad-skip-button-modern');
+        if (skipParent && !skipParent.__catblockerProcessed) tasks.push(replaceNodeWithCat(skipParent));
+    } catch {}
+
     // Replace ad containers
     document.querySelectorAll(selectors.join(",")).forEach(node => {
         if (node.__catblockerProcessed) return;
+        if (node.closest('.catblocker-container')) return;
         const r = node.getBoundingClientRect();
         if (r.width < 80 || r.height < 50) return; // skip tiny
         tasks.push(replaceNodeWithCat(node));
@@ -163,6 +199,10 @@ async function replaceNodeWithCat(node) {
     container.append(img, badge);
 
     try {
+        // Preserve layout by copying computed min sizes if present
+        const cs = getComputedStyle(node);
+        if (cs.minWidth && cs.minWidth !== "auto") container.style.minWidth = cs.minWidth;
+        if (cs.minHeight && cs.minHeight !== "auto") container.style.minHeight = cs.minHeight;
         node.replaceWith(container);
     } catch {
         node.innerHTML = "";

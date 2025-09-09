@@ -8,14 +8,26 @@ const CAT_SELECTORS_BASE = [
     "[class*='advert']",
     "[class*='ads']",
     "[class*='sponsored']",
+    "[class*='promo']",
+    "[class*='promoted']",
     "[data-ad]",
     "[data-advertisement]",
+    "[aria-label='Ad']",
+    "[aria-label='Ads']",
+    "[role='advertisement']",
     "[data-testid='placementTracking']",
+    "[data-testid='ad']",
     "iframe[src*='ads']",
     "iframe[id*='ad']",
+    // YouTube common ad containers
+    "#player-ads",
+    ".ytp-ad-module",
+    "ytd-ad-slot-renderer",
+    "ytd-promoted-sparkles-web-renderer",
+    "ytd-in-feed-ad-layout-renderer",
     "ins.adsbygoogle",
     "div[id^='google_ads']",
-    ".ad, .ads, .advert, .advertisement"
+    ".ad, .ads, .advert, .advertisement, .sponsor, .sponsored, .promoted"
 ];
 
 const CAT_SELECTORS_AGGRESSIVE = [
