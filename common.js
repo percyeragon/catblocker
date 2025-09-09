@@ -19,6 +19,11 @@ const CAT_SELECTORS_BASE = [
     "[data-testid='ad']",
     "iframe[src*='ads']",
     "iframe[id*='ad']",
+    // Social platforms common ad units
+    "[data-testid='placementTracking'], [data-testid='fbfeed_story'], [data-testid='ad_unit']",
+    "div[role='complementary'][aria-label*='Sponsored']",
+    "div[aria-label='Sponsored']",
+    "a[aria-label='Sponsored']",
     // YouTube common ad containers
     "#player-ads",
     ".ytp-ad-module",
@@ -31,11 +36,72 @@ const CAT_SELECTORS_BASE = [
 ];
 
 const CAT_SELECTORS_AGGRESSIVE = [
-    // size-based common ad placeholders
+    // size-based common ad placeholders (robust, match common IAB sizes in inline styles)
+    // Popular rectangles
     "div[style*='width:300px'][style*='height:250px']",
+    "div[style*='height:250px'][style*='width:300px']",
+    "div[style*='width:336px'][style*='height:280px']",
+    "div[style*='height:280px'][style*='width:336px']",
+    "div[style*='width:250px'][style*='height:250px']",
+    "div[style*='width:200px'][style*='height:200px']",
+
+    // Leaderboards / billboards
     "div[style*='width:728px'][style*='height:90px']",
+    "div[style*='height:90px'][style*='width:728px']",
+    "div[style*='width:970px'][style*='height:250px']",
+    "div[style*='height:250px'][style*='width:970px']",
+    "div[style*='width:970px'][style*='height:90px']",
+    "div[style*='height:90px'][style*='width:970px']",
+    "div[style*='width:980px'][style*='height:120px']",
+    "div[style*='height:120px'][style*='width:980px']",
+
+    // Skyscrapers
     "div[style*='width:160px'][style*='height:600px']",
-    "div[style*='height:250px'][style*='width:300px']"
+    "div[style*='height:600px'][style*='width:160px']",
+    "div[style*='width:120px'][style*='height:600px']",
+    "div[style*='height:600px'][style*='width:120px']",
+    "div[style*='width:300px'][style*='height:600px']",
+    "div[style*='height:600px'][style*='width:300px']",
+
+    // Mobile banners
+    "div[style*='width:320px'][style*='height:50px']",
+    "div[style*='height:50px'][style*='width:320px']",
+    "div[style*='width:320px'][style*='height:100px']",
+    "div[style*='height:100px'][style*='width:320px']",
+    "div[style*='width:300px'][style*='height:50px']",
+    "div[style*='height:50px'][style*='width:300px']",
+    "div[style*='width:300px'][style*='height:100px']",
+    "div[style*='height:100px'][style*='width:300px']",
+
+    // Legacy banners
+    "div[style*='width:468px'][style*='height:60px']",
+    "div[style*='height:60px'][style*='width:468px']",
+    "div[style*='width:234px'][style*='height:60px']",
+    "div[style*='height:60px'][style*='width:234px']",
+    "div[style*='width:180px'][style*='height:150px']",
+    "div[style*='height:150px'][style*='width:180px']",
+
+    // Variants using min/max- sizes (common in placeholders)
+    "div[style*='min-width:300px'][style*='min-height:250px']",
+    "div[style*='min-height:250px'][style*='min-width:300px']",
+
+    // Attribute-based wrappers used by ad libraries (broad but ad-typical)
+    "[data-google-query-id]",
+    "[data-ad-client]",
+    "[data-ad-slot]",
+    "[data-ad-unit]",
+    "[data-testid='ad-slot']",
+    "ins[data-ad-client]",
+    "ins[data-ad-slot]",
+    "div[id^='gpt_unit_']",
+    "div[id*='gpt-ad']",
+    "div[id^='adngin-']",
+
+    // Also target typical containers with specific sizes
+    "ins[style*='width:300px'][style*='height:250px']",
+    "ins[style*='width:728px'][style*='height:90px']",
+    "aside[style*='width:300px'][style*='height:250px']",
+    "section[style*='width:300px'][style*='height:250px']"
 ];
 
 function hostnameOf(url) {
