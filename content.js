@@ -35,6 +35,7 @@ function injectCatblockerStylesOnce() {
       contain: layout paint style !important;
       isolation: isolate !important;
       will-change: contents;
+      pointer-events: none !important;
     }
   `;
     document.documentElement.appendChild(style);
@@ -91,6 +92,15 @@ function startReplacement() {
 }
 
 /* ---------------------------------------------------------
+   Helpers: protected areas
+--------------------------------------------------------- */
+const YT_HEADER_AREAS = "#masthead-container, #masthead, ytd-masthead, tp-yt-app-header, ytd-app #header, ytd-app tp-yt-app-header";
+
+function inHeaderArea(node) {
+    try { return !!node.closest(YT_HEADER_AREAS); } catch { return false; }
+}
+
+/* ---------------------------------------------------------
    Scan & Replace
 --------------------------------------------------------- */
 async function scanAndReplace() {
@@ -102,11 +112,17 @@ async function scanAndReplace() {
         const labelCandidates = Array.from(document.querySelectorAll("*[aria-label], [data-testid], span, div, a"));
         labelCandidates.forEach(el => {
             if (el.__catblockerProcessed) return;
+            // Skip anything inside header or known comment areas (YouTube and generic)
+            if (inHeaderArea(el)) return;
+            if (el.closest("#comments, ytd-comments, ytd-comment-thread-renderer, ytd-comment-view-model, ytd-item-section-renderer[section-identifier='comments-entry-point'], .comment, .comments, [role='comments']")) return;
             const txt = (el.textContent || "").trim().toLowerCase();
             if (!txt) return;
             if (["sponsored","promoted","anzeige","werbung","ad"].some(w => txt === w || txt.startsWith(w+" "))) {
                 const container = el.closest("article, li, ytd-rich-item-renderer, ytd-video-renderer, .feed-item, .card, .result, section, div");
                 if (container && !container.__catblockerProcessed) {
+                    // Also ensure the chosen container is not in header or a comment node
+                    if (inHeaderArea(container)) return;
+                    if (container.closest("#comments, ytd-comments, ytd-comment-thread-renderer, ytd-comment-view-model, ytd-item-section-renderer[section-identifier='comments-entry-point'], .comment, .comments, [role='comments']")) return;
                     tasks.push(replaceNodeWithCat(container));
                 }
             }
@@ -115,27 +131,41 @@ async function scanAndReplace() {
 
     // Replace ad iframes
     document.querySelectorAll("iframe[src*='ad'], iframe[id*='ad'], iframe[name*='ad']")
-        .forEach(el => tasks.push(replaceNodeWithCat(el)));
+        .forEach(el => {
+            if (el.__catblockerProcessed) return;
+            if (el.closest('#movie_player, .html5-video-player, ytd-player')) return;
+            if (inHeaderArea(el)) return;
+            if (el.closest('#comments, ytd-comments, ytd-comment-thread-renderer, ytd-comment-view-model, ytd-item-section-renderer[section-identifier="comments-entry-point"], .comment, .comments, [role="comments"]')) return;
+            tasks.push(replaceNodeWithCat(el));
+        });
 
     // YouTube specific: overlay and in-feed ads
     try {
         // In-feed and sidebar ad renderers
         document.querySelectorAll("ytd-ad-slot-renderer, ytd-action-companion-ad-renderer, ytd-display-ad-renderer, ytd-promoted-sparkles-web-renderer, ytd-in-feed-ad-layout-renderer, ytd-promoted-video-renderer").forEach(node => {
-            if (!node.__catblockerProcessed) tasks.push(replaceNodeWithCat(node));
+            if (node.__catblockerProcessed) return;
+            if (inHeaderArea(node)) return;
+            tasks.push(replaceNodeWithCat(node));
         });
         // Video ad containers and overlays in the player
         document.querySelectorAll(".video-ads, .ytp-ad-player-overlay, .ytp-ad-text, .ytp-ad-overlay-container, .ytp-ad-image-overlay, .ytp-ad-module").forEach(node => {
-            if (!node.__catblockerProcessed) tasks.push(replaceNodeWithCat(node));
+            if (!node.__catblockerProcessed) hideNode(node);
         });
         // Ad countdown and skip button areas sometimes isolated
         const skipParent = document.querySelector('.ytp-ad-skip-button-container, .ytp-ad-skip-button, .ytp-ad-skip-button-modern');
-        if (skipParent && !skipParent.__catblockerProcessed) tasks.push(replaceNodeWithCat(skipParent));
+        if (skipParent && !skipParent.__catblockerProcessed) hideNode(skipParent);
     } catch {}
 
     // Replace ad containers
     document.querySelectorAll(selectors.join(",")).forEach(node => {
         if (node.__catblockerProcessed) return;
         if (node.closest('.catblocker-container')) return;
+        // Never replace anything inside YouTube's video player container
+        if (node.closest('#movie_player, .html5-video-player, ytd-player')) return;
+        // Never replace anything inside YouTube header
+        if (inHeaderArea(node)) return;
+        // Never replace anything inside known comment areas
+        if (node.closest('#comments, ytd-comments, ytd-comment-thread-renderer, ytd-comment-view-model, ytd-item-section-renderer[section-identifier="comments-entry-point"], .comment, .comments, [role="comments"]')) return;
         const r = node.getBoundingClientRect();
         if (r.width < 80 || r.height < 50) return; // skip tiny
         tasks.push(replaceNodeWithCat(node));
@@ -194,6 +224,7 @@ async function replaceNodeWithCat(node) {
     background: #000a !important;
     color: #fff !important;
     border-radius: 6px !important;
+    pointer-events: none !important;
   `;
 
     container.append(img, badge);
@@ -208,4 +239,12 @@ async function replaceNodeWithCat(node) {
         node.innerHTML = "";
         node.appendChild(container);
     }
+}
+
+function hideNode(node) {
+    try {
+        node.__catblockerProcessed = true;
+        node.style.setProperty('display', 'none', 'important');
+        node.setAttribute('aria-hidden', 'true');
+    } catch {}
 }
