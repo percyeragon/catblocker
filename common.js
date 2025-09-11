@@ -143,3 +143,14 @@ async function pickCatSrc() {
         return chrome.runtime.getURL(`cats/cat${idx}.jpg`);
     }
 }
+// De-duplicate helper to avoid duplicated matches across selector arrays
+function uniqueSelectors(arr) {
+    return Array.from(new Set(arr));
+}
+
+// Override chooseSelectors to ensure uniqueness (kleine Optimierung)
+const _chooseSelectors = chooseSelectors;
+chooseSelectors = function(intensity) {
+    const s = _chooseSelectors(intensity);
+    return uniqueSelectors(s);
+};

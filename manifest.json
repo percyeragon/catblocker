@@ -15,10 +15,8 @@
   },
   "permissions": [
     "storage",
-    "scripting",
     "activeTab",
-    "contextMenus",
-    "declarativeNetRequestWithHostAccess"
+    "contextMenus"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {
@@ -41,5 +39,14 @@
       "matches": ["<all_urls>"]
     }
   ],
-  "options_page": "options/options.html"
+  "options_page": "options/options.html",
+  "commands": {
+    "replace-now": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+K"
+      },
+      "description": "CatBlocker: Replace ads on this page"
+    }
+  }
+
 }
