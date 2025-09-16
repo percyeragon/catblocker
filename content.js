@@ -4,7 +4,7 @@
 /* ================================
    State & constants
 ================================ */
-let settings = { enabled: true, intensity: "aggressive", whitelist: [] };
+let settings = { enabled: true, intensity: "aggressive", whitelist: [], cmpBypassSourcepoint: true };
 let observer = null;              // MutationObserver
 let io = null;                    // IntersectionObserver for visible candidates
 let scanBusy = false;             // simple lock to avoid re-entrance
@@ -15,6 +15,68 @@ const MAX_PER_PAGE  = 500;        // hard upper bound for replacements per page
 const MAX_PER_TICK  = 30;         // how many nodes to process per animation frame
 const MIN_WIDTH     = 80;
 const MIN_HEIGHT    = 50;
+
+/* ================================
+   Lifecycle & safe messaging
+================================ */
+let alive = true;
+
+function teardown() {
+    alive = false;
+    try { observer && observer.disconnect(); } catch {}
+    try { io && io.disconnect && io.disconnect(); } catch {}
+    try { pendingNodes && pendingNodes.clear && pendingNodes.clear(); } catch {}
+}
+
+addEventListener("pagehide", teardown, { once: true });
+addEventListener("beforeunload", teardown, { once: true });
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "unloaded") teardown();
+});
+
+function safeSendMessage(msg) {
+    try {
+        if (!alive || !chrome?.runtime?.id) return Promise.resolve();
+        return chrome.runtime.sendMessage(msg).catch(() => {});
+    } catch {
+        return Promise.resolve();
+    }
+}
+
+/* ================================
+   Safe observer helpers
+================================ */
+function isNode(x) {
+    return !!(x && typeof x === "object" && typeof x.nodeType === "number");
+}
+function safeObserve(mo, target, options) {
+    if (mo && isNode(target)) {
+        try { mo.observe(target, options); } catch {}
+    }
+}
+function onReady(fn) {
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", fn, { once: true });
+    } else {
+        fn();
+    }
+}
+
+/* ================================
+   Loop-Guard (avoid reload ping-pong)
+================================ */
+function loopGuardArm(originKey = location.origin) {
+    try {
+        const key = "__catblocker_loopguard__" + originKey;
+        const now = Date.now();
+        const raw = sessionStorage.getItem(key);
+        let bucket = raw ? JSON.parse(raw) : { count: 0, ts: now };
+        if (now - bucket.ts > 30000) bucket = { count: 0, ts: now }; // 30s window
+        bucket.count++;
+        sessionStorage.setItem(key, JSON.stringify(bucket));
+        return bucket.count;
+    } catch { return 1; }
+}
 
 /* ================================
    CSS injection to avoid warnings
@@ -76,21 +138,6 @@ function isInYouTubeUi(el) {
     return YT_UI_BLOCKLIST.some(sel => !!el.closest(sel));
 }
 
-// YT ad renderers (safe to replace/hide)
-const YT_AD_SELECTORS = [
-    "ytd-ad-slot-renderer",
-    "ytd-display-ad-renderer",
-    "ytd-in-feed-ad-layout-renderer",
-    "ytd-promoted-video-renderer",
-    "ytd-promoted-sparkles-web-renderer",
-    "ytd-promoted-item-renderer",
-    "ytd-ad-inline-playback-renderer",
-    "ytd-player-legacy-desktop-watch-ads-renderer",
-    // overlays/modules (we hide them, not replace):
-    ".video-ads", ".ytp-ad-player-overlay", ".ytp-ad-text",
-    ".ytp-ad-overlay-container", ".ytp-ad-image-overlay", ".ytp-ad-module"
-];
-
 function isYouTubePlayerSubtree(el) {
     return !!el.closest('#movie_player, .html5-video-player, ytd-player');
 }
@@ -100,12 +147,229 @@ function isInComments(el) {
 }
 
 /* ================================
+   Interstitial heuristics & helpers
+================================ */
+function isLikelyInterstitial(el) {
+    try {
+        const cs = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        const fixedish = cs.position === "fixed" || cs.position === "sticky" || cs.position === "absolute";
+        const big = (r.width >= window.innerWidth * 0.5 && r.height >= window.innerHeight * 0.4) || (r.width >= 320 && r.height >= 200);
+        return fixedish && big;
+    } catch { return false; }
+}
+
+/* ================================
+   CMP / Sourcepoint soft bypass (optional)
+================================ */
+function isSourcepointNode(el) {
+    if (!el) return false;
+    if (el.id && (el.id.startsWith("sp_message_container_") || el.id.startsWith("sp_message_iframe_") || el.id === "sp_veil")) return true;
+    if (el.classList && (el.classList.contains("sp_veil") || el.classList.contains("sp_message") || el.classList.contains("sp_message_container"))) return true;
+    const src = (el.tagName === "IFRAME") ? (el.getAttribute("src") || "") : "";
+    return /sourcepoint\./i.test(src);
+}
+
+function neutralizeSourcepointNode(el) {
+    try {
+        el.__catblockerProcessed = true;
+        el.setAttribute("aria-hidden", "true");
+        el.removeAttribute("aria-modal");
+        // weich: durchklickbar & unsichtbar, aber kein display:none (vermeidet Reload-Triggers)
+        el.style.setProperty("pointer-events", "none", "important");
+        el.style.setProperty("opacity", "0.001", "important");
+        el.style.setProperty("visibility", "hidden", "important");
+        el.style.setProperty("z-index", "-1", "important");
+    } catch {}
+}
+
+function setupSourcepointBypass() {
+    if (!settings.cmpBypassSourcepoint) return;
+
+    const neutralizeAll = (root) => {
+        root.querySelectorAll?.(
+            '[id^="sp_message_container_"], [id^="sp_message_iframe_"], #sp_veil, .sp_veil, .sp_message, .sp_message_container'
+        ).forEach(el => { if (!el.__catblockerProcessed) neutralizeSourcepointNode(el); });
+    };
+
+    neutralizeAll(document);
+
+    const mo = new MutationObserver((muts) => {
+        for (const m of muts) {
+            m.addedNodes && m.addedNodes.forEach(n => {
+                if (!(n instanceof Element)) return;
+                if (isSourcepointNode(n)) neutralizeSourcepointNode(n);
+                neutralizeAll(n);
+            });
+            if (m.type === "attributes" && m.target instanceof Element && isSourcepointNode(m.target)) {
+                neutralizeSourcepointNode(m.target);
+            }
+        }
+    });
+
+    // Beobachte nur documentElement (stabil), nicht dauernd html/body Styles
+    safeObserve(mo, document.documentElement, {
+        subtree: true, childList: true, attributes: true,
+        attributeFilter: ["id","class","style","aria-modal","aria-hidden"]
+    });
+}
+
+/* ================================
+   Neutralize ONLY ad-iframe interstitials
+================================ */
+function detectAndHideInterstitials() {
+    if (window.__CATBLOCKER_SAFE_MODE__) return;
+
+    const candidates = Array.from(document.querySelectorAll(
+        `[role="dialog"], [aria-modal="true"], .modal, .overlay, .interstitial, .popup, .lightbox, .backdrop, .modal-backdrop`
+    ));
+
+    const adIframeSelector =
+        `iframe[src*="doubleclick"],` +
+        `iframe[src*="googlesyndication"],` +
+        `iframe[src*="adservice"],` +
+        `iframe[src*="adnxs"],` +
+        `iframe[src*="taboola"],` +
+        `iframe[src*="outbrain"],` +
+        `iframe[src*="revcontent"],` +
+        `iframe[src*="criteo"],` +
+        `iframe[src*="adroll"],` +
+        `iframe[id*="ad"], iframe[name*="ad"]`;
+
+    let touched = 0;
+
+    for (const el of candidates) {
+        if (el.__catblockerProcessed) continue;
+
+        // Sourcepoint explizit weich neutralisieren
+        if (settings.cmpBypassSourcepoint && (isSourcepointNode(el) || el.querySelector?.(adIframeSelector))) {
+            if (!/\bcookie|consent|privacy|gdpr\b/i.test((el.textContent || "").toLowerCase())) {
+                // Nur echte Werbe-Interstitials; Consent kann man optional auslassen
+                if (isLikelyInterstitial(el)) { neutralizeOverlay(el); touched++; }
+            }
+            continue;
+        }
+
+        if (!isLikelyInterstitial(el)) continue;
+        const adIframe = el.querySelector(adIframeSelector);
+        if (!adIframe) continue;
+
+        const txt = (el.textContent || "").toLowerCase();
+        if (/\bcookie|consent|preferences|privacy|gdpr\b/i.test(txt)) continue;
+
+        neutralizeOverlay(el);
+        touched++;
+    }
+
+    if (touched > 0) {
+        // Sanfter CSS-only Unlock (kein Klassenstrippen)
+        if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(4000);
+    }
+}
+
+function neutralizeOverlay(node) {
+    try {
+        node.__catblockerProcessed = true;
+        node.setAttribute("inert", "");
+        node.setAttribute("aria-hidden", "true");
+        node.removeAttribute("aria-modal");
+        node.style.setProperty("pointer-events", "none", "important");
+        node.style.setProperty("opacity", "0", "important");
+        node.style.setProperty("visibility", "hidden", "important");
+        node.style.setProperty("z-index", "-1", "important");
+    } catch {}
+}
+
+/* ================================
+   Unlock Daemon — CSS-only + optional capture-unblocker
+================================ */
+let unlockCssActive = false;
+let unlockTimer = null;
+let unblockerActive = false;
+const SCROLL_KEYS = new Set(["ArrowUp","ArrowDown","PageUp","PageDown","Home","End","Space"," "]);
+
+function injectUnlockStyles() {
+    if (unlockCssActive) return;
+    unlockCssActive = true;
+    const style = document.createElement("style");
+    style.id = "catblocker-unlock-style";
+    style.textContent = `
+    html { scrollbar-gutter: stable both-edges; }
+    html, body {
+      overflow-y: auto !important;
+      overscroll-behavior: auto !important;
+      touch-action: auto !important;
+    }
+    main, #app, #root, #page, #content, #container, #wrap, #wrapper, #__next,
+    [data-scroll-lock], [data-scroll-blocked] {
+      overflow-y: auto !important;
+      overscroll-behavior: auto !important;
+      touch-action: auto !important;
+    }
+  `;
+    document.documentElement.appendChild(style);
+}
+
+function removeUnlockStyles() {
+    const s = document.getElementById("catblocker-unlock-style");
+    if (s) s.remove();
+    unlockCssActive = false;
+}
+
+function addScrollCaptureUnblockers() {
+    if (unblockerActive) return;
+    unblockerActive = true;
+
+    const allowScroll = (e) => { e.stopImmediatePropagation(); };
+    const allowKeyScroll = (e) => {
+        if (!SCROLL_KEYS.has(e.key)) return;
+        e.stopImmediatePropagation();
+    };
+
+    window.addEventListener("wheel", allowScroll, { capture: true, passive: false });
+    window.addEventListener("touchmove", allowScroll, { capture: true, passive: false });
+    window.addEventListener("keydown", allowKeyScroll, { capture: true });
+
+    addScrollCaptureUnblockers._handlers = { allowScroll, allowKeyScroll };
+}
+
+function removeScrollCaptureUnblockers() {
+    if (!unblockerActive) return;
+    unblockerActive = false;
+    const h = addScrollCaptureUnblockers._handlers || {};
+    try {
+        window.removeEventListener("wheel", h.allowScroll, { capture: true });
+        window.removeEventListener("touchmove", h.allowScroll, { capture: true });
+        window.removeEventListener("keydown", h.allowKeyScroll, { capture: true });
+    } catch {}
+}
+
+function startUnlockDaemon(durationMs = 4000) {
+    stopUnlockDaemon();
+    injectUnlockStyles();
+    addScrollCaptureUnblockers();
+    unlockTimer = setTimeout(stopUnlockDaemon, durationMs);
+}
+
+function stopUnlockDaemon() {
+    if (unlockTimer) { clearTimeout(unlockTimer); unlockTimer = null; }
+    removeUnlockStyles();
+    removeScrollCaptureUnblockers();
+}
+
+/* ================================
    Init
 ================================ */
 (async function init() {
+    // Loop guard (safe mode if too many loads)
+    const hits = loopGuardArm();
+    if (hits > 3) {
+        window.__CATBLOCKER_SAFE_MODE__ = true;
+    }
+
     try {
-        const resp = await chrome.runtime.sendMessage({ type: "CATBLOCKER_GET_SETTINGS" });
-        if (resp?.ok && resp.settings) settings = resp.settings;
+        const resp = await safeSendMessage({ type: "CATBLOCKER_GET_SETTINGS" });
+        if (resp?.ok && resp.settings) settings = { ...settings, ...resp.settings };
     } catch {}
 
     const host = hostnameOf(location.href);
@@ -114,6 +378,7 @@ function isInComments(el) {
     }
 
     injectCatblockerStylesOnce();
+    setupSourcepointBypass();
     startReplacement();
 })();
 
@@ -133,6 +398,7 @@ function startReplacement() {
         }
     });
 
+    // documentElement exists immediately → safe
     observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
@@ -141,11 +407,21 @@ function startReplacement() {
     });
 
     chrome.runtime.onMessage.addListener((msg) => {
+        if (!alive) return;
         if (msg?.type === "CATBLOCKER_FORCE_SCAN") scheduleScan();
     });
 }
 
+/* Throttled scheduling to avoid scan storms */
+let lastScanAt = 0;
 function scheduleScan() {
+    const now = performance.now();
+    if (now - lastScanAt < 250) { // min 250ms spacing
+        if (scheduleScan._t) cancelAnimationFrame(scheduleScan._t);
+        scheduleScan._t = requestAnimationFrame(() => scheduleScan());
+        return;
+    }
+    lastScanAt = now;
     if (scheduleScan._t) cancelAnimationFrame(scheduleScan._t);
     scheduleScan._t = requestAnimationFrame(() => scanAndReplace());
 }
@@ -167,16 +443,16 @@ function ensureIO() {
 }
 
 function processBatch(nodes) {
-    if (!nodes || !nodes.length) return;
+    if (!nodes || !nodes.length || !alive) return;
     const work = [...nodes];
 
     const step = () => {
-        if (!work.length) return;
+        if (!alive || !work.length) return;
         const slice = work.splice(0, MAX_PER_TICK);
         Promise.allSettled(slice.map(n => replaceNodeWithCat(n)))
             .then(() => {
                 totalReplaced += slice.length;
-                chrome.runtime.sendMessage({ type: "CATBLOCKER_ADD_COUNT", amount: slice.length }).catch(()=>{});
+                safeSendMessage({ type: "CATBLOCKER_ADD_COUNT", amount: slice.length });
                 if (totalReplaced >= MAX_PER_PAGE) return;
                 if (work.length) requestAnimationFrame(step);
             });
@@ -190,6 +466,7 @@ function processBatch(nodes) {
 async function scanAndReplace() {
     if (scanBusy) return;
     scanBusy = true;
+    if (!alive) { scanBusy = false; return; }
     ensureIO();
 
     try { detectAndHideInterstitials(); } catch {}
@@ -217,7 +494,8 @@ async function scanAndReplace() {
                 "ytd-player-legacy-desktop-watch-ads-renderer"
             ].join(",")).forEach(el => {
                 if (el.__catblockerProcessed) return;
-                if (isInYouTubeUi(el)) return;     // safety: never header/player/comments/guide
+                if (isInYouTubeUi(el)) return;     // never header/player/comments/guide
+                if (isLikelyInterstitial(el)) { neutralizeOverlay(el); return; }
                 markCandidate(el);
             });
         } catch {}
@@ -232,6 +510,7 @@ async function scanAndReplace() {
                 if (isYouTubePlayerSubtree(el)) return;
                 if (isInComments(el)) return;
                 if (isYouTubeSite() && isInYouTubeUi(el)) return;
+                if (isLikelyInterstitial(el)) { neutralizeOverlay(el); return; }
                 markCandidate(el);
             });
     } catch {}
@@ -253,6 +532,7 @@ async function scanAndReplace() {
                 if (r.width >= 160 && r.height >= 90) {
                     const hint = bgImg.toLowerCase();
                     if (/(doubleclick|googlesyndication|adservice|adnxs|taboola|outbrain|revcontent|adsystem|adroll|criteo)/.test(hint)) {
+                        if (isLikelyInterstitial(el)) { neutralizeOverlay(el); continue; }
                         markCandidate(el);
                     }
                 }
@@ -275,6 +555,7 @@ async function scanAndReplace() {
                 const container = el.closest("article, li, ytd-rich-item-renderer, ytd-video-renderer, .feed-item, .card, .result, section, div");
                 if (container && !container.__catblockerProcessed && !inHeaderArea(container) && !inGenericUiArea(container)) {
                     if (isYouTubeSite() && isInYouTubeUi(container)) return;
+                    if (isLikelyInterstitial(container)) { neutralizeOverlay(container); return; }
                     markCandidate(container);
                 }
             }
@@ -294,6 +575,7 @@ async function scanAndReplace() {
 
                 const r = node.getBoundingClientRect();
                 if (r.width < MIN_WIDTH || r.height < MIN_HEIGHT) return;
+                if (isLikelyInterstitial(node)) { neutralizeOverlay(node); return; }
                 markCandidate(node);
             });
         }
@@ -303,6 +585,7 @@ async function scanAndReplace() {
     for (const el of pendingNodes) io.observe(el);
     pendingNodes.clear();
 
+    if (!alive) { scanBusy = false; return; }
     scanBusy = false;
 }
 
@@ -317,11 +600,28 @@ function markCandidate(el) {
 ================================ */
 async function replaceNodeWithCat(node) {
     try {
-        if (node.__catblockerProcessed) return;
+        if (!alive || node.__catblockerProcessed) return;
+
+        // Failsafe: Interstitials niemals durch Katze ersetzen
+        if (isLikelyInterstitial(node)) { neutralizeOverlay(node); if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000); return; }
+
         node.__catblockerProcessed = true;
 
-        const catUrl = await pickCatSrc();
+        let catUrl = "";
+        try {
+            catUrl = await pickCatSrc();
+        } catch { return; }
+        if (!alive) return;
+
         const rect = node.getBoundingClientRect();
+
+        // Extra failsafe: wenn sehr groß, nicht ersetzen
+        const vw = window.innerWidth, vh = window.innerHeight;
+        if (rect.width > vw * 0.8 || rect.height > vh * 0.7) {
+            neutralizeOverlay(node);
+            if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
+            return;
+        }
 
         // On YouTube use a slightly larger minimal size to reduce layout jumps
         const minW = isYouTubeSite() ? 200 : 100;
@@ -373,6 +673,8 @@ async function replaceNodeWithCat(node) {
             node.innerHTML = "";
             node.appendChild(container);
         }
+
+        if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
     } catch {
         // swallow node errors
     }
@@ -402,22 +704,4 @@ function hideNode(node) {
         node.style.setProperty("visibility", "hidden", "important");
         node.style.setProperty("opacity", "0", "important");
     } catch {}
-}
-
-/* Hide interstitial overlays/popups that often carry ads (defensive) */
-function detectAndHideInterstitials() {
-    const candidates = document.querySelectorAll(
-        '.ad, .ads, .advert, .advertisement, ' +
-        '[aria-modal="true"], [role="dialog"], .modal, .overlay, .interstitial'
-    );
-    for (const n of candidates) {
-        if (n.__catblockerProcessed) continue;
-        const r = n.getBoundingClientRect();
-        if ((r.width >= 300 && r.height >= 200) || (r.width >= window.innerWidth * 0.6 && r.height >= 200)) {
-            const txt = (n.textContent || "").toLowerCase();
-            if (/(advert|werbung|anzeige|sponsor|ad\b|ad-|ads)/.test(txt) || (r.width >= window.innerWidth * 0.6)) {
-                hideNode(n);
-            }
-        }
-    }
 }

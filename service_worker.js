@@ -10,15 +10,6 @@ const DEFAULT_SETTINGS = {
 /* ================================
    Helpers
 ================================ */
-async function updateBadge(counter) {
-    try {
-        const text = String(counter ?? 0);
-        await chrome.action.setBadgeText({ text });
-        await chrome.action.setBadgeBackgroundColor({ color: "#2f6690" });
-    } catch {
-        // ignore
-    }
-}
 
 /* ================================
    Installation / Updates
@@ -33,10 +24,6 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         if (current.counter == null) merged.counter = 0;
         await chrome.storage.sync.set(merged);
     }
-
-    // Initialize badge
-    const { counter = 0 } = await chrome.storage.sync.get("counter");
-    updateBadge(counter);
 });
 
 /* ================================
@@ -55,14 +42,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: true });
         }
 
-        else if (msg?.type === "CATBLOCKER_ADD_COUNT") {
-            const { amount = 1 } = msg;
-            const data = await chrome.storage.sync.get(["counter"]);
-            const counter = (data.counter || 0) + amount;
-            await chrome.storage.sync.set({ counter });
-            updateBadge(counter);
-            sendResponse({ ok: true, counter });
-        }
     })();
 
     // Required: keep channel open for async
