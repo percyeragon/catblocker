@@ -233,3 +233,11 @@ h2 { margin: 0 0 10px; font-size: 16px; }
     padding:0 !important; margin:-1px !important; overflow:hidden !important;
     clip:rect(0,0,0,0) !important; white-space:nowrap !important; border:0 !important;
 }
+
+/* ... dein bestehendes CSS oben bleibt unverändert ... */
+
+/* Grid for categories */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.check input { width: 16px; height: 16px; accent-color: var(--brand); }
+

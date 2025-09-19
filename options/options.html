@@ -11,7 +11,7 @@
     <header class="header">
         <div class="titles">
             <h1>CatBlocker – Options</h1>
-            <p>Configure behavior, whitelist domains, and manage your cat gallery.</p>
+            <p>Configure behavior, whitelist domains, and control network-level blocking.</p>
         </div>
         <div class="header-actions">
             <div class="theme">
@@ -49,40 +49,88 @@
                 <option value="aggressive">Aggressive</option>
             </select>
         </div>
+    </section>
 
+    <!-- Categories -->
+    <section class="card">
+        <h2>Blocking categories</h2>
+        <p class="hint">These are blocked at the network level (declarativeNetRequest). Changes apply immediately.</p>
+        <div class="grid">
+            <label class="check">
+                <input type="checkbox" id="cat-ads" />
+                <span>Ads</span>
+            </label>
+            <label class="check">
+                <input type="checkbox" id="cat-analytics" />
+                <span>Analytics</span>
+            </label>
+            <label class="check">
+                <input type="checkbox" id="cat-social" />
+                <span>Social</span>
+            </label>
+            <label class="check">
+                <input type="checkbox" id="cat-error" />
+                <span>Error trackers</span>
+            </label>
+            <label class="check">
+                <input type="checkbox" id="cat-oems" />
+                <span>OEMs</span>
+            </label>
+            <label class="check">
+                <input type="checkbox" id="cat-mix" />
+                <span>Mix</span>
+            </label>
+        </div>
+    </section>
+
+    <!-- Custom ad domains -->
+    <section class="card">
+        <h2>Custom ad domains</h2>
+        <p class="hint">Add domains to block. They’re used for network blocking and in-page detection.</p>
+        <div class="row addline">
+            <input type="text" id="customDomainInput" placeholder="tracker.example.com" inputmode="url" autocomplete="off" />
+            <button id="addCustomDomain" class="btn">Add</button>
+        </div>
+        <div id="customDomainChips" class="chips"></div>
+        <div class="row right">
+            <button id="clearCustomDomains" class="btn subtle">Clear list</button>
+        </div>
     </section>
 
     <!-- Whitelist -->
     <section class="card">
         <h2>Whitelist</h2>
         <p class="hint">Domains on the whitelist are ignored by CatBlocker.</p>
-
         <div class="row addline">
             <input type="text" id="domainInput" placeholder="example.com" inputmode="url" autocomplete="off" />
             <button id="addDomain" class="btn">Add</button>
         </div>
-
         <div id="domainChips" class="chips"></div>
         <div class="row right">
             <button id="clearWhitelist" class="btn subtle">Clear whitelist</button>
         </div>
     </section>
 
-    <!-- Cat Gallery -->
+    <!-- Overrides -->
     <section class="card">
-        <h2>Cat Gallery</h2>
-        <p class="hint">
-            CatBlocker uses bundled images in <code>cats/</code>. Add custom image URLs to randomize from the web.
-        </p>
+        <h2>Per-host overrides</h2>
+        <p class="hint">Allow rules always win over blocks. Block rules override categories.</p>
 
         <div class="row addline">
-            <input type="url" id="catUrl" placeholder="https://example.com/mycat.jpg" autocomplete="off" />
-            <button id="addCatUrl" class="btn">Add</button>
+            <input type="text" id="allowInput" placeholder="e.g. extmaps-api.yandex.net" inputmode="url" autocomplete="off" />
+            <button id="addAllow" class="btn">Add allow</button>
         </div>
+        <div id="allowChips" class="chips"></div>
 
-        <div id="catList" class="gallery"></div>
+        <div class="row addline" style="margin-top:8px">
+            <input type="text" id="blockInput" placeholder="e.g. offerwall.yandex.net" inputmode="url" autocomplete="off" />
+            <button id="addBlock" class="btn danger">Add block</button>
+        </div>
+        <div id="blockChips" class="chips"></div>
+
         <div class="row right">
-            <button id="clearCatUrls" class="btn subtle">Clear custom URLs</button>
+            <button id="clearAllow" class="btn subtle">Clear allow</button>
+            <button id="clearBlock" class="btn subtle">Clear block</button>
         </div>
     </section>
 
@@ -103,6 +151,9 @@
 </div>
 
 <div id="toast" role="status" aria-live="polite"></div>
+
+<!-- Load commons first so DEFAULT_SETTINGS is available -->
+<script src="../common.js"></script>
 <script src="options.js"></script>
 </body>
 </html>

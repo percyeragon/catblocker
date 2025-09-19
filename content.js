@@ -1,18 +1,26 @@
 // content.js — CatBlocker content script (no imports/exports)
-// Relies on globals from common.js: hostnameOf, chooseSelectors, pickCatSrc
+// Requires common.js to be loaded first (globals: hostnameOf, chooseSelectors, pickCatSrc,
+// buildDomainRegexFromSettings, buildIframeSelectorFromSettings)
 
 /* ================================
    State & constants
 ================================ */
-let settings = { enabled: true, intensity: "aggressive", whitelist: [], cmpBypassSourcepoint: true };
-let observer = null;              // MutationObserver
+let settings = {
+    enabled: true,
+    intensity: "aggressive",
+    whitelist: [],
+    cmpBypassSourcepoint: true,
+    customBlocklistDomains: []
+};
+
+let observer = null;              // MutationObserver for DOM changes
 let io = null;                    // IntersectionObserver for visible candidates
-let scanBusy = false;             // simple lock to avoid re-entrance
-let pendingNodes = new Set();     // candidates awaiting IO observation
+let scanBusy = false;             // simple re-entrancy guard
+let pendingNodes = new Set();     // candidates waiting for IO
 let totalReplaced = 0;
 
-const MAX_PER_PAGE  = 500;        // hard upper bound for replacements per page
-const MAX_PER_TICK  = 30;         // how many nodes to process per animation frame
+const MAX_PER_PAGE  = 500;        // safety upper bound (avoid over-replacing)
+const MAX_PER_TICK  = 30;         // batch size per frame
 const MIN_WIDTH     = 80;
 const MIN_HEIGHT    = 50;
 
@@ -38,28 +46,17 @@ function safeSendMessage(msg) {
     try {
         if (!alive || !chrome?.runtime?.id) return Promise.resolve();
         return chrome.runtime.sendMessage(msg).catch(() => {});
-    } catch {
-        return Promise.resolve();
-    }
+    } catch { return Promise.resolve(); }
 }
 
 /* ================================
-   Safe observer helpers
+   Helpers (safe observe, DOM ready)
 ================================ */
-function isNode(x) {
-    return !!(x && typeof x === "object" && typeof x.nodeType === "number");
-}
-function safeObserve(mo, target, options) {
-    if (mo && isNode(target)) {
-        try { mo.observe(target, options); } catch {}
-    }
-}
+function isNode(x) { return !!(x && typeof x === "object" && typeof x.nodeType === "number"); }
+function safeObserve(mo, target, options) { if (mo && isNode(target)) { try { mo.observe(target, options); } catch {} } }
 function onReady(fn) {
-    if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", fn, { once: true });
-    } else {
-        fn();
-    }
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn, { once: true });
+    else fn();
 }
 
 /* ================================
@@ -79,75 +76,47 @@ function loopGuardArm(originKey = location.origin) {
 }
 
 /* ================================
-   CSS injection to avoid warnings
+   CSS for our own containers (warnings/overflow)
 ================================ */
 function injectCatblockerStylesOnce() {
     if (document.getElementById("catblocker-style")) return;
     const style = document.createElement("style");
     style.id = "catblocker-style";
     style.textContent = `
-    /* Opt-out of View Transitions for our nodes */
-    .catblocker-container, .catblocker-container * {
-      view-transition-name: none !important;
+    /* Isolate our replacements from View Transitions & overflow issues */
+    .catblocker-container, .catblocker-container * { view-transition-name: none !important; }
+    .catblocker-container img, .catblocker-container video, .catblocker-container canvas {
+      display: block !important; width: 100% !important; height: 100% !important;
+      object-fit: cover !important; overflow: clip !important; overflow-clip-margin: content-box; contain: paint;
     }
-
-    /* Ensure media never paint outside their box */
-    .catblocker-container img,
-    .catblocker-container video,
-    .catblocker-container canvas {
-      display: block !important;
-      width: 100% !important;
-      height: 100% !important;
-      object-fit: cover !important;
-      overflow: clip !important;
-      overflow-clip-margin: content-box;
-      contain: paint;
-    }
-
-    .catblocker-container {
-      contain: layout paint style !important;
-      isolation: isolate !important;
-      will-change: contents;
-    }
+    .catblocker-container { contain: layout paint style !important; isolation: isolate !important; will-change: contents; }
   `;
     document.documentElement.appendChild(style);
 }
 
 /* ================================
-   YouTube helpers & guards
+   YouTube guards
 ================================ */
 function isYouTubeSite() {
     const h = location.hostname.replace(/^www\./, "");
     return h === "youtube.com" || h.endsWith(".youtube.com") || h === "m.youtube.com";
 }
-
-// UI areas we must never touch on YT
 const YT_UI_BLOCKLIST = [
-    "ytd-masthead", "tp-yt-app-header", "#masthead", "#masthead-container",
-    "#page-manager", "#content", "#columns",
-    "#guide", "ytd-mini-guide-renderer", "#guide-content",
-    "ytd-feed-filter-chip-bar-renderer", "#chips",
-    "ytd-rich-grid-renderer", "ytd-rich-item-renderer", "ytd-video-renderer",
-    "ytd-watch-flexy", "#primary", "#secondary",
-    "#player", ".html5-video-player", "#movie_player", "ytd-player",
-    "#related", "#comments", "ytd-comments"
+    "ytd-masthead","tp-yt-app-header","#masthead","#masthead-container",
+    "#page-manager","#content","#columns",
+    "#guide","ytd-mini-guide-renderer","#guide-content",
+    "ytd-feed-filter-chip-bar-renderer","#chips",
+    "ytd-rich-grid-renderer","ytd-rich-item-renderer","ytd-video-renderer",
+    "ytd-watch-flexy","#primary","#secondary",
+    "#player",".html5-video-player","#movie_player","ytd-player",
+    "#related","#comments","ytd-comments"
 ];
-
-function isInYouTubeUi(el) {
-    if (!isYouTubeSite()) return false;
-    return YT_UI_BLOCKLIST.some(sel => !!el.closest(sel));
-}
-
-function isYouTubePlayerSubtree(el) {
-    return !!el.closest('#movie_player, .html5-video-player, ytd-player');
-}
-
-function isInComments(el) {
-    return !!el.closest('#comments, ytd-comments, ytd-comment-thread-renderer, ytd-comment-view-model, ytd-item-section-renderer[section-identifier="comments-entry-point"], .comment, .comments, [role="comments"]');
-}
+function isInYouTubeUi(el){ return isYouTubeSite() && YT_UI_BLOCKLIST.some(sel => !!el.closest(sel)); }
+function isYouTubePlayerSubtree(el){ return !!el.closest('#movie_player, .html5-video-player, ytd-player'); }
+function isInComments(el){ return !!el.closest('#comments, ytd-comments, ytd-comment-thread-renderer, ytd-comment-view-model, ytd-item-section-renderer[section-identifier="comments-entry-point"], .comment, .comments, [role="comments"]'); }
 
 /* ================================
-   Interstitial heuristics & helpers
+   Interstitial heuristics
 ================================ */
 function isLikelyInterstitial(el) {
     try {
@@ -160,7 +129,7 @@ function isLikelyInterstitial(el) {
 }
 
 /* ================================
-   CMP / Sourcepoint soft bypass (optional)
+   CMP / Sourcepoint soft bypass
 ================================ */
 function isSourcepointNode(el) {
     if (!el) return false;
@@ -169,20 +138,18 @@ function isSourcepointNode(el) {
     const src = (el.tagName === "IFRAME") ? (el.getAttribute("src") || "") : "";
     return /sourcepoint\./i.test(src);
 }
-
 function neutralizeSourcepointNode(el) {
     try {
         el.__catblockerProcessed = true;
         el.setAttribute("aria-hidden", "true");
         el.removeAttribute("aria-modal");
-        // weich: durchklickbar & unsichtbar, aber kein display:none (vermeidet Reload-Triggers)
+        // soft: make it non-interactive and (practically) invisible without display:none:
         el.style.setProperty("pointer-events", "none", "important");
         el.style.setProperty("opacity", "0.001", "important");
         el.style.setProperty("visibility", "hidden", "important");
         el.style.setProperty("z-index", "-1", "important");
     } catch {}
 }
-
 function setupSourcepointBypass() {
     if (!settings.cmpBypassSourcepoint) return;
 
@@ -207,7 +174,6 @@ function setupSourcepointBypass() {
         }
     });
 
-    // Beobachte nur documentElement (stabil), nicht dauernd html/body Styles
     safeObserve(mo, document.documentElement, {
         subtree: true, childList: true, attributes: true,
         attributeFilter: ["id","class","style","aria-modal","aria-hidden"]
@@ -217,56 +183,6 @@ function setupSourcepointBypass() {
 /* ================================
    Neutralize ONLY ad-iframe interstitials
 ================================ */
-function detectAndHideInterstitials() {
-    if (window.__CATBLOCKER_SAFE_MODE__) return;
-
-    const candidates = Array.from(document.querySelectorAll(
-        `[role="dialog"], [aria-modal="true"], .modal, .overlay, .interstitial, .popup, .lightbox, .backdrop, .modal-backdrop`
-    ));
-
-    const adIframeSelector =
-        `iframe[src*="doubleclick"],` +
-        `iframe[src*="googlesyndication"],` +
-        `iframe[src*="adservice"],` +
-        `iframe[src*="adnxs"],` +
-        `iframe[src*="taboola"],` +
-        `iframe[src*="outbrain"],` +
-        `iframe[src*="revcontent"],` +
-        `iframe[src*="criteo"],` +
-        `iframe[src*="adroll"],` +
-        `iframe[id*="ad"], iframe[name*="ad"]`;
-
-    let touched = 0;
-
-    for (const el of candidates) {
-        if (el.__catblockerProcessed) continue;
-
-        // Sourcepoint explizit weich neutralisieren
-        if (settings.cmpBypassSourcepoint && (isSourcepointNode(el) || el.querySelector?.(adIframeSelector))) {
-            if (!/\bcookie|consent|privacy|gdpr\b/i.test((el.textContent || "").toLowerCase())) {
-                // Nur echte Werbe-Interstitials; Consent kann man optional auslassen
-                if (isLikelyInterstitial(el)) { neutralizeOverlay(el); touched++; }
-            }
-            continue;
-        }
-
-        if (!isLikelyInterstitial(el)) continue;
-        const adIframe = el.querySelector(adIframeSelector);
-        if (!adIframe) continue;
-
-        const txt = (el.textContent || "").toLowerCase();
-        if (/\bcookie|consent|preferences|privacy|gdpr\b/i.test(txt)) continue;
-
-        neutralizeOverlay(el);
-        touched++;
-    }
-
-    if (touched > 0) {
-        // Sanfter CSS-only Unlock (kein Klassenstrippen)
-        if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(4000);
-    }
-}
-
 function neutralizeOverlay(node) {
     try {
         node.__catblockerProcessed = true;
@@ -280,8 +196,42 @@ function neutralizeOverlay(node) {
     } catch {}
 }
 
+function detectAndHideInterstitials(DOMAIN_RE, adIframeSelector) {
+    if (window.__CATBLOCKER_SAFE_MODE__) return;
+
+    const candidates = Array.from(document.querySelectorAll(
+        `[role="dialog"], [aria-modal="true"], .modal, .overlay, .interstitial, .popup, .lightbox, .backdrop, .modal-backdrop`
+    ));
+
+    let touched = 0;
+
+    for (const el of candidates) {
+        if (el.__catblockerProcessed) continue;
+        if (!isLikelyInterstitial(el)) continue;
+
+        // If this interstitial itself (or its iframe) is ad-related → neutralize
+        const hasAdIframe = !!el.querySelector(adIframeSelector);
+        const text = (el.textContent || "").toLowerCase();
+        const isConsentText = /\bcookie|consent|preferences|privacy|gdpr\b/i.test(text);
+
+        if (hasAdIframe && !isConsentText) {
+            neutralizeOverlay(el);
+            touched++;
+            continue;
+        }
+
+        // Sourcepoint-specific containers (soft bypass already handles most)
+        if (settings.cmpBypassSourcepoint && isSourcepointNode(el)) {
+            neutralizeSourcepointNode(el);
+            touched++;
+        }
+    }
+
+    if (touched > 0 && !window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(4000);
+}
+
 /* ================================
-   Unlock Daemon — CSS-only + optional capture-unblocker
+   CSS-only Unlock (no class/inline stripping)
 ================================ */
 let unlockCssActive = false;
 let unlockTimer = null;
@@ -295,21 +245,14 @@ function injectUnlockStyles() {
     style.id = "catblocker-unlock-style";
     style.textContent = `
     html { scrollbar-gutter: stable both-edges; }
-    html, body {
-      overflow-y: auto !important;
-      overscroll-behavior: auto !important;
-      touch-action: auto !important;
-    }
+    html, body { overflow-y: auto !important; overscroll-behavior: auto !important; touch-action: auto !important; }
     main, #app, #root, #page, #content, #container, #wrap, #wrapper, #__next,
     [data-scroll-lock], [data-scroll-blocked] {
-      overflow-y: auto !important;
-      overscroll-behavior: auto !important;
-      touch-action: auto !important;
+      overflow-y: auto !important; overscroll-behavior: auto !important; touch-action: auto !important;
     }
   `;
     document.documentElement.appendChild(style);
 }
-
 function removeUnlockStyles() {
     const s = document.getElementById("catblocker-unlock-style");
     if (s) s.remove();
@@ -321,10 +264,7 @@ function addScrollCaptureUnblockers() {
     unblockerActive = true;
 
     const allowScroll = (e) => { e.stopImmediatePropagation(); };
-    const allowKeyScroll = (e) => {
-        if (!SCROLL_KEYS.has(e.key)) return;
-        e.stopImmediatePropagation();
-    };
+    const allowKeyScroll = (e) => { if (SCROLL_KEYS.has(e.key)) e.stopImmediatePropagation(); };
 
     window.addEventListener("wheel", allowScroll, { capture: true, passive: false });
     window.addEventListener("touchmove", allowScroll, { capture: true, passive: false });
@@ -332,7 +272,6 @@ function addScrollCaptureUnblockers() {
 
     addScrollCaptureUnblockers._handlers = { allowScroll, allowKeyScroll };
 }
-
 function removeScrollCaptureUnblockers() {
     if (!unblockerActive) return;
     unblockerActive = false;
@@ -350,7 +289,6 @@ function startUnlockDaemon(durationMs = 4000) {
     addScrollCaptureUnblockers();
     unlockTimer = setTimeout(stopUnlockDaemon, durationMs);
 }
-
 function stopUnlockDaemon() {
     if (unlockTimer) { clearTimeout(unlockTimer); unlockTimer = null; }
     removeUnlockStyles();
@@ -361,11 +299,9 @@ function stopUnlockDaemon() {
    Init
 ================================ */
 (async function init() {
-    // Loop guard (safe mode if too many loads)
+    // Loop guard (enable safe-mode if too many loads)
     const hits = loopGuardArm();
-    if (hits > 3) {
-        window.__CATBLOCKER_SAFE_MODE__ = true;
-    }
+    if (hits > 3) window.__CATBLOCKER_SAFE_MODE__ = true;
 
     try {
         const resp = await safeSendMessage({ type: "CATBLOCKER_GET_SETTINGS" });
@@ -373,9 +309,7 @@ function stopUnlockDaemon() {
     } catch {}
 
     const host = hostnameOf(location.href);
-    if (!settings.enabled || (settings.whitelist || []).includes(host)) {
-        return; // disabled or whitelisted
-    }
+    if (!settings.enabled || (settings.whitelist || []).includes(host)) return;
 
     injectCatblockerStylesOnce();
     setupSourcepointBypass();
@@ -383,7 +317,7 @@ function stopUnlockDaemon() {
 })();
 
 /* ================================
-   Core wiring
+   Core wiring (scan + observe)
 ================================ */
 function startReplacement() {
     scheduleScan();
@@ -391,14 +325,10 @@ function startReplacement() {
 
     observer = new MutationObserver((mutations) => {
         for (const m of mutations) {
-            if ((m.addedNodes && m.addedNodes.length) || m.type === "attributes") {
-                scheduleScan();
-                break;
-            }
+            if ((m.addedNodes && m.addedNodes.length) || m.type === "attributes") { scheduleScan(); break; }
         }
     });
 
-    // documentElement exists immediately → safe
     observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
@@ -412,18 +342,18 @@ function startReplacement() {
     });
 }
 
-/* Throttled scheduling to avoid scan storms */
+/* Throttled scheduling (avoid scan storms) */
 let lastScanAt = 0;
 function scheduleScan() {
     const now = performance.now();
-    if (now - lastScanAt < 250) { // min 250ms spacing
+    if (now - lastScanAt < 250) {
         if (scheduleScan._t) cancelAnimationFrame(scheduleScan._t);
-        scheduleScan._t = requestAnimationFrame(() => scheduleScan());
+        scheduleScan._t = requestAnimationFrame(scheduleScan);
         return;
     }
     lastScanAt = now;
     if (scheduleScan._t) cancelAnimationFrame(scheduleScan._t);
-    scheduleScan._t = requestAnimationFrame(() => scanAndReplace());
+    scheduleScan._t = requestAnimationFrame(scanAndReplace);
 }
 
 /* ================================
@@ -449,13 +379,12 @@ function processBatch(nodes) {
     const step = () => {
         if (!alive || !work.length) return;
         const slice = work.splice(0, MAX_PER_TICK);
-        Promise.allSettled(slice.map(n => replaceNodeWithCat(n)))
-            .then(() => {
-                totalReplaced += slice.length;
-                safeSendMessage({ type: "CATBLOCKER_ADD_COUNT", amount: slice.length });
-                if (totalReplaced >= MAX_PER_PAGE) return;
-                if (work.length) requestAnimationFrame(step);
-            });
+        Promise.allSettled(slice.map(n => replaceNodeWithCat(n))).then(() => {
+            totalReplaced += slice.length;
+            safeSendMessage({ type: "CATBLOCKER_ADD_COUNT", amount: slice.length });
+            if (totalReplaced >= MAX_PER_PAGE) return;
+            if (work.length) requestAnimationFrame(step);
+        });
     };
     requestAnimationFrame(step);
 }
@@ -469,20 +398,37 @@ async function scanAndReplace() {
     if (!alive) { scanBusy = false; return; }
     ensureIO();
 
-    try { detectAndHideInterstitials(); } catch {}
+    // Build dynamic domain tools from settings (provided by common.js)
+    const DOMAIN_RE = (typeof buildDomainRegexFromSettings === "function")
+        ? buildDomainRegexFromSettings(settings)
+        : /(doubleclick|googlesyndication|adservice|adnxs|taboola|outbrain|revcontent|adsystem|adroll|criteo)/i;
 
-    // --- YOUTUBE FIRST: explicit ad renderers only; never touch UI areas ---
+    const adIframeSelector = (typeof buildIframeSelectorFromSettings === "function")
+        ? buildIframeSelectorFromSettings(settings)
+        : [
+            `iframe[src*="doubleclick"]`,
+            `iframe[src*="googlesyndication"]`,
+            `iframe[src*="adservice"]`,
+            `iframe[src*="adnxs"]`,
+            `iframe[src*="taboola"]`,
+            `iframe[src*="outbrain"]`,
+            `iframe[src*="revcontent"]`,
+            `iframe[src*="criteo"]`,
+            `iframe[src*="adroll"]`,
+            `iframe[id*="ad"]`,
+            `iframe[name*="ad"]`
+        ].join(",");
+
+    try { detectAndHideInterstitials(DOMAIN_RE, adIframeSelector); } catch {}
+
+    // YOUTUBE: only explicit ad renderers; never core UI
     if (isYouTubeSite()) {
         try {
-            // Hide overlays/modules (do not replace to avoid UI flicker)
             document.querySelectorAll(".video-ads, .ytp-ad-player-overlay, .ytp-ad-text, .ytp-ad-overlay-container, .ytp-ad-image-overlay, .ytp-ad-module")
                 .forEach(node => { if (!node.__catblockerProcessed) hideNode(node); });
-
-            // Hide skip buttons (optional)
             const skipParent = document.querySelector(".ytp-ad-skip-button-container, .ytp-ad-skip-button, .ytp-ad-skip-button-modern");
             if (skipParent && !skipParent.__catblockerProcessed) hideNode(skipParent);
 
-            // Replace only explicit ad renderers, never core UI
             document.querySelectorAll([
                 "ytd-ad-slot-renderer",
                 "ytd-display-ad-renderer",
@@ -494,28 +440,27 @@ async function scanAndReplace() {
                 "ytd-player-legacy-desktop-watch-ads-renderer"
             ].join(",")).forEach(el => {
                 if (el.__catblockerProcessed) return;
-                if (isInYouTubeUi(el)) return;     // never header/player/comments/guide
+                if (isInYouTubeUi(el)) return;
                 if (isLikelyInterstitial(el)) { neutralizeOverlay(el); return; }
                 markCandidate(el);
             });
         } catch {}
     }
 
-    // 1) iframe-based ads
+    // 1) iframe-based ads (dynamic selector)
     try {
-        document.querySelectorAll("iframe[src*='ad'], iframe[id*='ad'], iframe[name*='ad']")
-            .forEach(el => {
-                if (el.__catblockerProcessed) return;
-                if (inHeaderArea(el) || inGenericUiArea(el)) return;
-                if (isYouTubePlayerSubtree(el)) return;
-                if (isInComments(el)) return;
-                if (isYouTubeSite() && isInYouTubeUi(el)) return;
-                if (isLikelyInterstitial(el)) { neutralizeOverlay(el); return; }
-                markCandidate(el);
-            });
+        document.querySelectorAll(adIframeSelector).forEach(el => {
+            if (el.__catblockerProcessed) return;
+            if (inHeaderArea(el) || inGenericUiArea(el)) return;
+            if (isYouTubePlayerSubtree(el)) return;
+            if (isInComments(el)) return;
+            if (isYouTubeSite() && isInYouTubeUi(el)) return;
+            if (isLikelyInterstitial(el)) { neutralizeOverlay(el); return; }
+            markCandidate(el);
+        });
     } catch {}
 
-    // 2) background-image ads (conservative)
+    // 2) background-image ads (use DOMAIN_RE)
     try {
         const bgCandidates = document.querySelectorAll("div, section, aside, a");
         for (const el of bgCandidates) {
@@ -531,7 +476,7 @@ async function scanAndReplace() {
                 const r = el.getBoundingClientRect();
                 if (r.width >= 160 && r.height >= 90) {
                     const hint = bgImg.toLowerCase();
-                    if (/(doubleclick|googlesyndication|adservice|adnxs|taboola|outbrain|revcontent|adsystem|adroll|criteo)/.test(hint)) {
+                    if (DOMAIN_RE.test(hint)) {
                         if (isLikelyInterstitial(el)) { neutralizeOverlay(el); continue; }
                         markCandidate(el);
                     }
@@ -540,7 +485,7 @@ async function scanAndReplace() {
         }
     } catch {}
 
-    // 3) sponsored/advert labels → climb to container (not YT UI)
+    // 3) sponsored / advert labels → replace container (not YT UI/core)
     try {
         const labelCandidates = document.querySelectorAll("*[aria-label], [data-testid], span, div, a");
         labelCandidates.forEach(el => {
@@ -562,7 +507,7 @@ async function scanAndReplace() {
         });
     } catch {}
 
-    // 4) generic selectors (from common.js)
+    // 4) generic selectors (from settings intensity)
     try {
         const selectors = chooseSelectors(settings.intensity);
         if (selectors && selectors.length) {
@@ -581,7 +526,7 @@ async function scanAndReplace() {
         }
     } catch {}
 
-    // Send candidates to IO (visible-only processing)
+    // send candidates to IO (visible-only processing)
     for (const el of pendingNodes) io.observe(el);
     pendingNodes.clear();
 
@@ -589,6 +534,9 @@ async function scanAndReplace() {
     scanBusy = false;
 }
 
+/* ================================
+   Mark candidate for replacement
+================================ */
 function markCandidate(el) {
     if (totalReplaced >= MAX_PER_PAGE) return;
     if (el.__catblockerProcessed) return;
@@ -596,37 +544,37 @@ function markCandidate(el) {
 }
 
 /* ================================
-   Replacement
+   Replacement: replace node with cat
 ================================ */
 async function replaceNodeWithCat(node) {
     try {
         if (!alive || node.__catblockerProcessed) return;
 
-        // Failsafe: Interstitials niemals durch Katze ersetzen
-        if (isLikelyInterstitial(node)) { neutralizeOverlay(node); if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000); return; }
+        // never replace interstitials (we neutralize instead)
+        if (isLikelyInterstitial(node)) {
+            neutralizeOverlay(node);
+            if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
+            return;
+        }
 
         node.__catblockerProcessed = true;
 
         let catUrl = "";
-        try {
-            catUrl = await pickCatSrc();
-        } catch { return; }
+        try { catUrl = await pickCatSrc(); } catch { return; }
         if (!alive) return;
 
         const rect = node.getBoundingClientRect();
-
-        // Extra failsafe: wenn sehr groß, nicht ersetzen
         const vw = window.innerWidth, vh = window.innerHeight;
+
+        // extra guard: if gigantic, neutralize instead of replacing
         if (rect.width > vw * 0.8 || rect.height > vh * 0.7) {
             neutralizeOverlay(node);
             if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
             return;
         }
 
-        // On YouTube use a slightly larger minimal size to reduce layout jumps
         const minW = isYouTubeSite() ? 200 : 100;
         const minH = isYouTubeSite() ? 120 : 80;
-
         const w = Math.max(minW, Math.floor(rect.width))  || (isYouTubeSite() ? 300 : 300);
         const h = Math.max(minH, Math.floor(rect.height)) || (isYouTubeSite() ? 180 : 250);
 
@@ -667,36 +615,24 @@ async function replaceNodeWithCat(node) {
 
         container.append(img, badge);
 
-        try {
-            node.replaceWith(container);
-        } catch {
-            node.innerHTML = "";
-            node.appendChild(container);
-        }
+        try { node.replaceWith(container); }
+        catch { node.innerHTML = ""; node.appendChild(container); }
 
         if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
-    } catch {
-        // swallow node errors
-    }
+    } catch { /* swallow node errors */ }
 }
 
 /* ================================
-   Generic guards & utilities
+   Generic guards
 ================================ */
 function inHeaderArea(el) {
-    // Avoid replacing site chrome: headers/nav/footers/sidebars
     return !!el.closest("header, nav, footer, [role='banner'], [role='navigation'], [role='contentinfo'], .header, .navbar, .site-header, .site-nav, .footer, .sidebar, [data-testid='TopNavBar']");
 }
-
 function inGenericUiArea(el) {
-    // Avoid generic shells: app sidebars, toolbars, modals, cookie dialogs
-    const generic = !!el.closest(".sidebar, .toolbar, .modal, .dialog, .cookie, .consent, [role='dialog'], [data-testid='sidebar'], [data-testid='toolbar']");
-    if (generic) return true;
-    // YouTube UI areas off-limits
+    if (!!el.closest(".sidebar, .toolbar, .modal, .dialog, .cookie, .consent, [role='dialog'], [data-testid='sidebar'], [data-testid='toolbar']")) return true;
     if (isYouTubeSite() && isInYouTubeUi(el)) return true;
     return false;
 }
-
 function hideNode(node) {
     try {
         node.__catblockerProcessed = true;
