@@ -577,6 +577,43 @@ async function scanAndReplace() {
         }
     } catch {}
 
+    // 5) video-based ads (video/source tags)
+    try {
+        const videos = document.querySelectorAll('video, source');
+        for (const el of videos) {
+            if (el.__catblockerProcessed) continue;
+            if (isYouTubeSite() && isInYouTubeUi(el)) continue;
+
+            // prefer attribute over property for <source>
+            const src = (el.getAttribute('src') || el.src || '').toLowerCase();
+
+            // Heuristics: ad-host OR common ad keywords in URL (vast, preroll, adserver, ads, doubleclick)
+            if (src && (DOMAIN_RE.test(src) || /(?:^|[/?&._-])(vast|preroll|adserver|ads?|doubleclick)(?:[/?&._-]|$)/i.test(src))) {
+                // Option A: neutralisieren (Standard – verhindert UI-Jumps/Scroll-Blocks)
+                neutralizeOverlay(el);
+
+                // Option B: stattdessen durch Katze ersetzen → die nächste Zeile aktivieren
+                // markCandidate(el);
+            } else {
+                // Manche Player füttern Ads via blob: oder MSE – erkenne typische Hinweis-Attribute
+                const cls = (el.className || "").toLowerCase();
+                const ds = (el.dataset || {});
+                const hintText = (el.closest('[data-ad],[data-advertisement],[data-preroll],[data-vast],[data-ads]') || null);
+
+                if (/(?:^|\\b)(ad|preroll|vast)(?:\\b|_|-)/i.test(cls) ||
+                    ds.ad === "true" || ds.ads === "true" || ds.preroll === "true" || ds.vast === "true" || hintText) {
+                    if (isLikelyInterstitial(el)) {
+                        neutralizeOverlay(el);
+                    } else {
+                        // siehe Option A/B oben
+                        neutralizeOverlay(el);
+                        // markCandidate(el);
+                    }
+                }
+            }
+        }
+    } catch {}
+
     // send candidates to IO (visible-only processing)
     for (const el of pendingNodes) io.observe(el);
     pendingNodes.clear();
