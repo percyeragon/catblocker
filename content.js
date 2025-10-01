@@ -231,47 +231,93 @@ function detectAndHideInterstitials(DOMAIN_RE, adIframeSelector) {
 }
 
 /* ================================
-   CSS-only Unlock (no class/inline stripping)
+   Targeted Unlock (preserve scroll)
 ================================ */
-let unlockCssActive = false;
 let unlockTimer = null;
 let unblockerActive = false;
 const SCROLL_KEYS = new Set(["ArrowUp","ArrowDown","PageUp","PageDown","Home","End","Space"," "]);
 
-function injectUnlockStyles() {
-    if (unlockCssActive) return;
-    unlockCssActive = true;
-    const style = document.createElement("style");
-    style.id = "catblocker-unlock-style";
-    style.textContent = `
-    html { scrollbar-gutter: stable both-edges; }
-    html, body { overflow-y: auto !important; overscroll-behavior: auto !important; touch-action: auto !important; }
-    main, #app, #root, #page, #content, #container, #wrap, #wrapper, #__next,
-    [data-scroll-lock], [data-scroll-blocked] {
-      overflow-y: auto !important; overscroll-behavior: auto !important; touch-action: auto !important;
-    }
-  `;
-    document.documentElement.appendChild(style);
+// Merke, welche Container wir wirklich verändert haben, um sie später sauber zurückzusetzen
+let _unlockTouched = [];
+
+function getCandidateScrollContainers() {
+    // häufige App-Wrapper + Dokument
+    const list = [
+        document.scrollingElement || document.documentElement,
+        document.body,
+        ...document.querySelectorAll("main, #app, #root, #page, #content, #container, #wrap, #wrapper, #__next, [data-scroll-lock], [data-scroll-blocked]")
+    ];
+    // eindeutige Elements (ohne null/undefined)
+    return Array.from(new Set(list.filter(Boolean)));
 }
-function removeUnlockStyles() {
-    const s = document.getElementById("catblocker-unlock-style");
-    if (s) s.remove();
-    unlockCssActive = false;
+
+function captureScrollPos() {
+    const docEl = document.scrollingElement || document.documentElement;
+    return {
+        winX: window.scrollX,
+        winY: window.scrollY,
+        perEl: getCandidateScrollContainers().map(el => ({ el, x: el.scrollLeft, y: el.scrollTop }))
+    };
+}
+
+function restoreScrollPos(state) {
+    if (!state) return;
+    // erst Elemente, dann Fenster (rahmen rAF, damit Layout stabil ist)
+    for (const it of state.perEl) {
+        try { it.el.scrollLeft = it.x; it.el.scrollTop = it.y; } catch {}
+    }
+    requestAnimationFrame(() => { window.scrollTo(state.winX, state.winY); });
+}
+
+function applyTargetedUnlock() {
+    const touched = [];
+    const cands = getCandidateScrollContainers();
+
+    for (const el of cands) {
+        try {
+            const cs = getComputedStyle(el);
+            // nur anfassen, wenn wirklich blockiert
+            if (cs.overflowY === "hidden" || cs.overflowY === "clip" || cs.touchAction === "none") {
+                const prev = {
+                    el,
+                    style: {
+                        overflowY: el.style.overflowY,
+                        overscrollBehavior: el.style.overscrollBehavior,
+                        touchAction: el.style.touchAction
+                    }
+                };
+                el.style.setProperty("overflow-y", "auto", "important");
+                el.style.setProperty("overscroll-behavior", "auto", "important");
+                el.style.setProperty("touch-action", "auto", "important");
+                touched.push(prev);
+            }
+        } catch {}
+    }
+    _unlockTouched = touched;
+}
+
+function revertTargetedUnlock() {
+    for (const t of _unlockTouched) {
+        try {
+            t.el.style.overflowY = t.style.overflowY || "";
+            t.el.style.overscrollBehavior = t.style.overscrollBehavior || "";
+            t.el.style.touchAction = t.style.touchAction || "";
+        } catch {}
+    }
+    _unlockTouched = [];
 }
 
 function addScrollCaptureUnblockers() {
     if (unblockerActive) return;
     unblockerActive = true;
-
     const allowScroll = (e) => { e.stopImmediatePropagation(); };
     const allowKeyScroll = (e) => { if (SCROLL_KEYS.has(e.key)) e.stopImmediatePropagation(); };
-
     window.addEventListener("wheel", allowScroll, { capture: true, passive: false });
     window.addEventListener("touchmove", allowScroll, { capture: true, passive: false });
     window.addEventListener("keydown", allowKeyScroll, { capture: true });
-
     addScrollCaptureUnblockers._handlers = { allowScroll, allowKeyScroll };
 }
+
 function removeScrollCaptureUnblockers() {
     if (!unblockerActive) return;
     unblockerActive = false;
@@ -285,15 +331,20 @@ function removeScrollCaptureUnblockers() {
 
 function startUnlockDaemon(durationMs = 4000) {
     stopUnlockDaemon();
-    injectUnlockStyles();
+    const snapshot = captureScrollPos();
+    applyTargetedUnlock();
     addScrollCaptureUnblockers();
+    // Nach dem Stilwechsel die Scrollpos sofort wiederherstellen
+    requestAnimationFrame(() => restoreScrollPos(snapshot));
     unlockTimer = setTimeout(stopUnlockDaemon, durationMs);
 }
+
 function stopUnlockDaemon() {
     if (unlockTimer) { clearTimeout(unlockTimer); unlockTimer = null; }
-    removeUnlockStyles();
     removeScrollCaptureUnblockers();
+    revertTargetedUnlock();
 }
+
 
 /* ================================
    Init

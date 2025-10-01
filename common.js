@@ -175,7 +175,7 @@ function chooseSelectors(intensity = "balanced") {
 /* ================================
    Cat image provider (local /cats folder)
 ================================ */
-const CATS = Array.from({ length: 16 }, (_, i) => `cat${i + 1}.jpg`);
+const CATS = Array.from({ length: 31 }, (_, i) => `cat${i + 1}.jpg`);
 
 let __lastCat = "";
 async function pickCatSrc() {
