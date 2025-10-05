@@ -24,6 +24,10 @@ const DEFAULT_SETTINGS = {
 // Session badge
 const session = { replacedCount: 0, lastBadgeUpdate: 0 };
 
+// Pro-Tab-Zähler (nur im RAM)
+const perTab = new Map();
+
+
 // ---- Settings I/O
 async function getSettings() {
     return new Promise((resolve) => {
@@ -265,10 +269,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (msg.type === "CATBLOCKER_ADD_COUNT") {
-        const n = Number(msg.amount || 0) || 0;
-        bumpBadge(n);
-        sendResponse({ ok: true });
+        const amount = Number(msg.amount) || 0;
+
+        // >>> das hattest du schon (gesamt/session hochzählen)
+        // z.B. bumpBadge(amount) oder session.replacedCount += amount;
+        if (typeof bumpBadge === "function") {
+            bumpBadge(amount);
+        } else if (typeof session?.replacedCount === "number") {
+            session.replacedCount += amount;
+        }
+
+        // >>> NEU: pro aktivem Tab mitzählen
+        const tabId = sender?.tab?.id;
+        if (tabId) {
+            const prev = perTab.get(tabId) || 0;
+            perTab.set(tabId, prev + amount);
+        }
+
+        sendResponse?.({ ok: true });
         return false;
+    }
+
+    // >>> NEU: Popup fragt This page & Insgesamt ab
+    if (msg.type === "CATBLOCKER_GET_COUNTS") {
+        const tabId = Number(msg.tabId);
+        sendResponse({
+            ok: true,
+            session: perTab.get(tabId) || 0,                // This page (pro Tab)
+            global: (session?.replacedCount ?? 0) | 0       // Insgesamt = was du bisher schon gezählt hast
+        });
+        return true;
     }
 
     if (msg.type === "CATBLOCKER_SET_SETTINGS") {
@@ -304,5 +334,14 @@ chrome.commands?.onCommand.addListener(async (command) => {
     const tabs = await chrome.tabs.query({ url: ["http://*/*","https://*/*"] });
     for (const t of tabs) {
         try { chrome.tabs.sendMessage(t.id, { type: "CATBLOCKER_FORCE_SCAN" }); } catch {}
+    }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.status === "loading") {
+        // nur Top-Level-Seiten (chrome:// auslassen)
+        if (tab?.url && !tab.url.startsWith("chrome://")) {
+            perTab.set(tabId, 0);
+        }
     }
 });

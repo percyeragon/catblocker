@@ -2,6 +2,7 @@
 
 function toast(msg){
     const t = document.getElementById("toast");
+    if (!t) return;
     t.textContent = msg;
     t.classList.add("show");
     setTimeout(() => t.classList.remove("show"), 1400);
@@ -30,6 +31,7 @@ function syncIntensitySeg(value){
     document.querySelectorAll(".segmented .seg").forEach(btn => {
         const sel = btn.dataset.value === value;
         btn.setAttribute("aria-selected", String(sel));
+        btn.classList.toggle("active", sel);
     });
     const sel = document.getElementById("intensity");
     if (sel) sel.value = value;
@@ -42,22 +44,29 @@ function applyTheme(theme){
     else root.removeAttribute("data-theme");
 }
 
+function setHostnameEl(hostname){
+    const el = document.getElementById("hostname");
+    if (!el) return;
+    // funktioniert für <span>, <div>, <input>
+    if ("value" in el) el.value = hostname;
+    el.textContent = hostname;
+}
+
 async function init(){
     const settings = await getSettings();
     applyTheme(settings.theme);
 
     const toggle = document.getElementById("toggleEnabled");
     const enabledLabel = document.getElementById("enabledLabel");
-    const sessionCount = document.getElementById("sessionCount");
-    const globalCount = document.getElementById("globalCount");
+    const sessionCountEl = document.getElementById("sessionCount");
+    const globalCountEl = document.getElementById("globalCount");
     const replaceNow = document.getElementById("replaceNow");
     const openOptions = document.getElementById("openOptions");
-    const hostnameEl = document.getElementById("hostname");
     const toggleWhitelist = document.getElementById("toggleWhitelist");
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const hostname = getHostname(tab?.url || "");
-    hostnameEl.value = hostname;
+    setHostnameEl(hostname);
 
     // Status
     toggle.checked = !!settings.enabled;
@@ -68,10 +77,26 @@ async function init(){
     const currentIntensity = settings.intensity || "balanced";
     syncIntensitySeg(currentIntensity);
 
-    // Counts (falls du globale Zählung in storage pflegst)
-    const data = await chrome.storage.sync.get(["counter"]);
-    globalCount.textContent = data.counter || 0;
-    sessionCount.textContent = "—"; // we don't have per-tab, show placeholder
+    // --- COUNTS: über Service Worker abfragen (statt storage.sync) ---
+    async function refreshCounts(){
+        try {
+            const resp = await chrome.runtime.sendMessage({
+                type: "CATBLOCKER_GET_COUNTS",
+                tabId: tab?.id
+            });
+            const sessionVal = Number(resp?.session ?? 0) || 0;
+            const globalVal  = Number(resp?.global  ?? 0) || 0;
+            if (sessionCountEl) sessionCountEl.textContent = String(sessionVal);
+            if (globalCountEl)  globalCountEl.textContent  = String(globalVal);
+        } catch {
+            if (sessionCountEl) sessionCountEl.textContent = "0";
+            if (globalCountEl)  globalCountEl.textContent  = "0";
+        }
+    }
+    await refreshCounts();
+    const countsTimer = setInterval(refreshCounts, 800);
+    window.addEventListener("unload", () => clearInterval(countsTimer));
+    // ---------------------------------------------------------------
 
     // Whitelist chip state
     const wl = new Set(settings.whitelist || []);
@@ -86,6 +111,7 @@ async function init(){
         await setSettings({ enabled });
         toast(enabled ? "Enabled" : "Disabled");
         if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_FORCE_SCAN" }).catch(()=>{});
+        refreshCounts();
     });
 
     document.querySelectorAll(".segmented .seg").forEach(btn => {
@@ -95,22 +121,27 @@ async function init(){
             await setSettings({ intensity: v });
             toast(`Intensity: ${v}`);
             if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_FORCE_SCAN" }).catch(()=>{});
+            refreshCounts();
         });
     });
 
     // Hidden select for a11y
     const intensitySelect = document.getElementById("intensity");
-    intensitySelect.addEventListener("change", async () => {
-        const v = intensitySelect.value;
-        syncIntensitySeg(v);
-        await setSettings({ intensity: v });
-        if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_FORCE_SCAN" }).catch(()=>{});
-    });
+    if (intensitySelect) {
+        intensitySelect.addEventListener("change", async () => {
+            const v = intensitySelect.value;
+            syncIntensitySeg(v);
+            await setSettings({ intensity: v });
+            if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_FORCE_SCAN" }).catch(()=>{});
+            refreshCounts();
+        });
+    }
 
     replaceNow.addEventListener("click", async () => {
         if (tab?.id) {
             await chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_FORCE_SCAN" }).catch(()=>{});
             toast("Scan triggered");
+            refreshCounts();
         }
     });
 
@@ -131,6 +162,7 @@ async function init(){
 
         // optional: sofortiger Rescan
         if (tab?.id) chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_FORCE_SCAN" }).catch(()=>{});
+        refreshCounts();
     });
 }
 
