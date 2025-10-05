@@ -133,11 +133,15 @@ function isLikelyInterstitial(el) {
 ================================ */
 function isSourcepointNode(el) {
     if (!el) return false;
-    if (el.id && (el.id.startsWith("sp_message_container_") || el.id.startsWith("sp_message_iframe_") || el.id === "sp_veil")) return true;
+    const id = (typeof el.id === "string") ? el.id : (el.id?.baseVal || "");  // <-- Fix hier
+    if (id && (id.startsWith("sp_message_container_") || id.startsWith("sp_message_iframe_") || id === "sp_veil")) return true;
+
     if (el.classList && (el.classList.contains("sp_veil") || el.classList.contains("sp_message") || el.classList.contains("sp_message_container"))) return true;
+
     const src = (el.tagName === "IFRAME") ? (el.getAttribute("src") || "") : "";
     return /sourcepoint\./i.test(src);
 }
+
 function neutralizeSourcepointNode(el) {
     try {
         el.__catblockerProcessed = true;
