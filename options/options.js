@@ -1,4 +1,4 @@
-// options.js — CatBlocker Options wired to settings object
+// options.js — CatBlocker Options (modernized but backward compatible)
 
 // DEFAULT_SETTINGS kommt aus common.js (global)
 
@@ -18,7 +18,9 @@ function normalizeDomain(v){
     if (!v) return "";
     v = v.trim();
     v = v.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
-    return v.split(/[\/?#]/)[0].toLowerCase();
+    v = v.replace(/[\/?#].*$/, "");
+    v = v.replace(/\.$/, ""); // trailing dot
+    return v.toLowerCase();
 }
 
 async function getSettings(){
@@ -40,17 +42,17 @@ function renderChips(containerId, list, onRemove){
     list.forEach((item, i) => {
         const chip = document.createElement("div");
         chip.className = "chip";
-        chip.innerHTML = `<span>${item}</span>`;
+        chip.setAttribute("role","listitem");
+        chip.innerHTML = `<span title="${item}">${item}</span>`;
         const btn = document.createElement("button");
         btn.className = "remove";
         btn.title = "Remove";
-        btn.textContent = "×";
+        btn.setAttribute("aria-label", `Remove ${item}`);
         btn.addEventListener("click", () => onRemove(i));
         chip.appendChild(btn);
         wrap.appendChild(chip);
     });
 }
-
 
 function syncSeg(value){
     document.querySelectorAll(".segmented .seg").forEach(btn => {
@@ -65,11 +67,10 @@ function applyTheme(theme){
     const root = document.documentElement;
     if (theme === "dark") root.setAttribute("data-theme", "dark");
     else if (theme === "light") root.setAttribute("data-theme", "light");
-    else root.removeAttribute("data-theme"); // system
+    else root.removeAttribute("data-theme");
 }
 
-/* ------------------------------ Storage helpers ------------------------------ */
-/* ------------------------------ Load & Bind ------------------------------ */
+/* ------------------------------ Load ------------------------------ */
 async function load(){
     const s = await getSettings();
 
@@ -128,9 +129,9 @@ async function load(){
         renderChips("blockChips", list, arguments.callee);
         toast("Removed block");
     });
-
 }
 
+/* ------------------------------ Bind ------------------------------ */
 function bind(){
     // Back link
     document.getElementById("backToPopup").addEventListener("click", (e) => {
@@ -144,7 +145,7 @@ function bind(){
         setStatus("Saved ✓");
     });
 
-    // Dark mode toggle
+    // Theme toggle
     const dm = document.getElementById("darkMode");
     dm?.addEventListener("change", async (e) => {
         const theme = e.target.checked ? "dark" : "light";
@@ -169,7 +170,17 @@ function bind(){
         setStatus("Saved ✓");
     });
 
+    // Utility to wire Enter key on text inputs
+    function enterAdds(inputId, clickBtnId){
+        const input = document.getElementById(inputId);
+        const btn = document.getElementById(clickBtnId);
+        input.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter") { ev.preventDefault(); btn.click(); }
+        });
+    }
+
     // Add allow
+    enterAdds("allowInput", "addAllow");
     document.getElementById("addAllow").addEventListener("click", async () => {
         const input = document.getElementById("allowInput");
         const v = normalizeDomain(input.value);
@@ -191,13 +202,13 @@ function bind(){
         toast("Added allow");
     });
 
-// Add block
+    // Add block (removes from allow if present)
+    enterAdds("blockInput", "addBlock");
     document.getElementById("addBlock").addEventListener("click", async () => {
         const input = document.getElementById("blockInput");
         const v = normalizeDomain(input.value);
         if (!v) { toast("Enter a domain"); return; }
         const s = await getSettings();
-        // Wenn Domain in allow existiert, entfernen wir sie – Allow gewinnt sonst sowieso
         const allow = new Set([...(s.allowDomains || [])]);
         allow.delete(v);
         const block = new Set([...(s.blockDomains || [])]);
@@ -224,18 +235,24 @@ function bind(){
         toast("Added block");
     });
 
-// Clear
-    document.getElementById("clearAllow").addEventListener("click", async () => {
-        await setSettings({ allowDomains: [] });
-        renderChips("allowChips", [], () => {});
-        toast("Allow list cleared");
+    // Clear lists (with tiny confirmation)
+    function confirmClear(message, action){
+        if (confirm(message)) action();
+    }
+    document.getElementById("clearAllow").addEventListener("click", () => {
+        confirmClear("Clear all allow rules?", async () => {
+            await setSettings({ allowDomains: [] });
+            renderChips("allowChips", [], () => {});
+            toast("Allow list cleared");
+        });
     });
-    document.getElementById("clearBlock").addEventListener("click", async () => {
-        await setSettings({ blockDomains: [] });
-        renderChips("blockChips", [], () => {});
-        toast("Block list cleared");
+    document.getElementById("clearBlock").addEventListener("click", () => {
+        confirmClear("Clear all block rules?", async () => {
+            await setSettings({ blockDomains: [] });
+            renderChips("blockChips", [], () => {});
+            toast("Block list cleared");
+        });
     });
-
 
     // Categories
     const catIds = [
@@ -255,7 +272,8 @@ function bind(){
         });
     });
 
-    // Add custom domain
+    // Custom domains (+Enter)
+    enterAdds("customDomainInput", "addCustomDomain");
     document.getElementById("addCustomDomain").addEventListener("click", async () => {
         const input = document.getElementById("customDomainInput");
         const v = normalizeDomain(input.value);
@@ -277,14 +295,14 @@ function bind(){
         toast("Added domain");
     });
 
-    // Clear custom domains
     document.getElementById("clearCustomDomains").addEventListener("click", async () => {
         await setSettings({ customBlocklistDomains: [] });
         renderChips("customDomainChips", [], () => {});
         toast("Custom domains cleared");
     });
 
-    // Add whitelist domain
+    // Whitelist (+Enter)
+    enterAdds("domainInput", "addDomain");
     document.getElementById("addDomain").addEventListener("click", async () => {
         const input = document.getElementById("domainInput");
         const v = normalizeDomain(input.value);
@@ -306,7 +324,6 @@ function bind(){
         toast("Added to whitelist");
     });
 
-    // Clear whitelist
     document.getElementById("clearWhitelist").addEventListener("click", async () => {
         await setSettings({ whitelist: [] });
         renderChips("domainChips", [], () => {});
@@ -326,32 +343,16 @@ function bind(){
         toast("Settings exported");
     });
 
-    document.getElementById("importFile").addEventListener("change", async (e) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-        try{
-            const text = await file.text();
-            const obj = JSON.parse(text);
-            // Accept either {settings:{...}} or a flat payload resembling DEFAULT_SETTINGS
-            const src = obj.settings ? obj.settings : obj;
-            const next = {
-                ...DEFAULT_SETTINGS,
-                ...src,
-                // sanitize collections
-                whitelist: Array.isArray(src.whitelist) ? src.whitelist.map(normalizeDomain).filter(Boolean) : [],
-                customBlocklistDomains: Array.isArray(src.customBlocklistDomains) ? src.customBlocklistDomains.map(normalizeDomain).filter(Boolean) : [],
-                categories: { ...DEFAULT_SETTINGS.categories, ...(src.categories || {}) },
-                intensity: ["gentle","balanced","aggressive"].includes(src.intensity) ? src.intensity : DEFAULT_SETTINGS.intensity,
-                enabled: typeof src.enabled === "boolean" ? src.enabled : DEFAULT_SETTINGS.enabled,
-                theme: ["light","dark","system"].includes(src.theme) ? src.theme : (src.theme ? src.theme : "light")
-            };
-            await setSettings(next);
-            await load();
-            toast("Settings imported");
-        } catch {
-            toast("Invalid settings file");
-        } finally {
-            e.target.value = "";
+    // File picker import
+    document.getElementById("importFile").addEventListener("change", (e) => importFromFileInput(e));
+
+    // Drag & Drop import anywhere
+    window.addEventListener("dragover", (e) => { e.preventDefault(); });
+    window.addEventListener("drop", async (e) => {
+        e.preventDefault();
+        const file = e.dataTransfer?.files?.[0];
+        if (file && file.type === "application/json") {
+            await importSettingsFromFile(file);
         }
     });
 
@@ -360,6 +361,36 @@ function bind(){
         await load();
         toast("Reset to defaults");
     });
+}
+
+async function importFromFileInput(e){
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await importSettingsFromFile(file);
+    e.target.value = "";
+}
+
+async function importSettingsFromFile(file){
+    try{
+        const text = await file.text();
+        const obj = JSON.parse(text);
+        const src = obj.settings ? obj.settings : obj;
+        const next = {
+            ...DEFAULT_SETTINGS,
+            ...src,
+            whitelist: Array.isArray(src.whitelist) ? src.whitelist.map(normalizeDomain).filter(Boolean) : [],
+            customBlocklistDomains: Array.isArray(src.customBlocklistDomains) ? src.customBlocklistDomains.map(normalizeDomain).filter(Boolean) : [],
+            categories: { ...DEFAULT_SETTINGS.categories, ...(src.categories || {}) },
+            intensity: ["gentle","balanced","aggressive"].includes(src.intensity) ? src.intensity : DEFAULT_SETTINGS.intensity,
+            enabled: typeof src.enabled === "boolean" ? src.enabled : DEFAULT_SETTINGS.enabled,
+            theme: ["light","dark","system"].includes(src.theme) ? src.theme : (src.theme ? src.theme : "light")
+        };
+        await setSettings(next);
+        await load();
+        toast("Settings imported");
+    } catch {
+        toast("Invalid settings file");
+    }
 }
 
 document.addEventListener("DOMContentLoaded", () => { bind(); load(); });

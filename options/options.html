@@ -11,14 +11,14 @@
     <header class="header">
         <div class="titles">
             <h1>CatBlocker – Options</h1>
-            <p>Configure behavior, whitelist domains, and control network-level blocking.</p>
+            <p>Tune blocking strength, manage lists, and control network rules.</p>
         </div>
         <div class="header-actions">
-            <div class="theme">
+            <div class="theme" title="Toggle light/dark">
                 <span class="label-inline">Theme</span>
-                <label class="switch" title="Dark mode">
+                <label class="switch">
                     <input type="checkbox" id="darkMode" />
-                    <span class="slider"></span>
+                    <span class="slider" aria-hidden="true"></span>
                 </label>
             </div>
             <a class="btn subtle" id="backToPopup" title="Open popup">Open popup</a>
@@ -28,70 +28,57 @@
     <!-- General -->
     <section class="card">
         <h2>General</h2>
-        <div class="row">
-            <label class="switch">
-                <input type="checkbox" id="enabled" />
-                <span class="slider"></span>
-            </label>
-            <span class="label">Extension enabled</span>
-        </div>
 
-        <div class="row intensity">
-            <span class="label">Intensity</span>
-            <div class="segmented" role="tablist" aria-label="Intensity">
-                <button class="seg" data-value="gentle" role="tab" aria-selected="false">Gentle</button>
-                <button class="seg" data-value="balanced" role="tab" aria-selected="true">Balanced</button>
-                <button class="seg" data-value="aggressive" role="tab" aria-selected="false">Aggressive</button>
+        <div class="row between wrap general-row">
+            <!-- Enabled toggle (links) -->
+            <div class="toggle">
+                <label class="switch" aria-label="Enable extension">
+                    <input type="checkbox" id="enabled" />
+                    <span class="slider" aria-hidden="true"></span>
+                </label>
+                <span class="label">Extension enabled</span>
             </div>
-            <select id="intensity" class="sr-only" aria-hidden="true">
-                <option value="gentle">Gentle</option>
-                <option value="balanced" selected>Balanced</option>
-                <option value="aggressive">Aggressive</option>
-            </select>
+
+            <!-- Intensity (rechts) -->
+            <div class="intensity">
+                <span class="label">Intensity</span>
+                <div class="segmented" role="tablist" aria-label="Blocking intensity">
+                    <button class="seg" data-value="gentle" role="tab" aria-selected="false">Gentle</button>
+                    <button class="seg" data-value="balanced" role="tab" aria-selected="true">Balanced</button>
+                    <button class="seg" data-value="aggressive" role="tab" aria-selected="false">Aggressive</button>
+                </div>
+                <select id="intensity" class="sr-only" aria-hidden="true">
+                    <option value="gentle">Gentle</option>
+                    <option value="balanced" selected>Balanced</option>
+                    <option value="aggressive">Aggressive</option>
+                </select>
+            </div>
         </div>
     </section>
 
     <!-- Categories -->
     <section class="card">
         <h2>Blocking categories</h2>
-        <p class="hint">These are blocked at the network level (declarativeNetRequest). Changes apply immediately.</p>
+        <p class="hint">Categories are enforced via <code>declarativeNetRequest</code>. Changes apply immediately.</p>
         <div class="grid">
-            <label class="check">
-                <input type="checkbox" id="cat-ads" />
-                <span>Ads</span>
-            </label>
-            <label class="check">
-                <input type="checkbox" id="cat-analytics" />
-                <span>Analytics</span>
-            </label>
-            <label class="check">
-                <input type="checkbox" id="cat-social" />
-                <span>Social</span>
-            </label>
-            <label class="check">
-                <input type="checkbox" id="cat-error" />
-                <span>Error trackers</span>
-            </label>
-            <label class="check">
-                <input type="checkbox" id="cat-oems" />
-                <span>OEMs</span>
-            </label>
-            <label class="check">
-                <input type="checkbox" id="cat-mix" />
-                <span>Mix</span>
-            </label>
+            <label class="check"><input type="checkbox" id="cat-ads" /><span>Ads</span></label>
+            <label class="check"><input type="checkbox" id="cat-analytics" /><span>Analytics</span></label>
+            <label class="check"><input type="checkbox" id="cat-social" /><span>Social</span></label>
+            <label class="check"><input type="checkbox" id="cat-error" /><span>Error trackers</span></label>
+            <label class="check"><input type="checkbox" id="cat-oems" /><span>OEMs</span></label>
+            <label class="check"><input type="checkbox" id="cat-mix" /><span>Mix</span></label>
         </div>
     </section>
 
     <!-- Custom ad domains -->
     <section class="card">
         <h2>Custom ad domains</h2>
-        <p class="hint">Add domains to block. They’re used for network blocking and in-page detection.</p>
+        <p class="hint">Additional domains to block at network level and for in-page detection.</p>
         <div class="row addline">
             <input type="text" id="customDomainInput" placeholder="tracker.example.com" inputmode="url" autocomplete="off" />
-            <button id="addCustomDomain" class="btn">Add</button>
+            <button id="addCustomDomain" class="btn" aria-label="Add custom domain">Add</button>
         </div>
-        <div id="customDomainChips" class="chips"></div>
+        <div id="customDomainChips" class="chips" role="list"></div>
         <div class="row right">
             <button id="clearCustomDomains" class="btn subtle">Clear list</button>
         </div>
@@ -100,43 +87,57 @@
     <!-- Whitelist -->
     <section class="card">
         <h2>Whitelist</h2>
-        <p class="hint">Domains on the whitelist are ignored by CatBlocker.</p>
+        <p class="hint">Domains here are ignored by CatBlocker.</p>
         <div class="row addline">
             <input type="text" id="domainInput" placeholder="example.com" inputmode="url" autocomplete="off" />
-            <button id="addDomain" class="btn">Add</button>
+            <button id="addDomain" class="btn" aria-label="Add to whitelist">Add</button>
         </div>
-        <div id="domainChips" class="chips"></div>
+        <div id="domainChips" class="chips" role="list"></div>
         <div class="row right">
             <button id="clearWhitelist" class="btn subtle">Clear whitelist</button>
         </div>
     </section>
 
-    <!-- Overrides -->
-    <section class="card">
-        <h2>Per-host overrides</h2>
-        <p class="hint">Allow rules always win over blocks. Block rules override categories.</p>
-
-        <div class="row addline">
-            <input type="text" id="allowInput" placeholder="e.g. extmaps-api.yandex.net" inputmode="url" autocomplete="off" />
-            <button id="addAllow" class="btn">Add allow</button>
+    <!-- Overrides (modernized) -->
+    <section class="card overrides">
+        <div class="ov-header">
+            <h2>Per-host overrides</h2>
+            <span class="hint">Allow rules always win over blocks. Block rules override categories.</span>
         </div>
-        <div id="allowChips" class="chips"></div>
 
-        <div class="row addline" style="margin-top:8px">
-            <input type="text" id="blockInput" placeholder="e.g. offerwall.yandex.net" inputmode="url" autocomplete="off" />
-            <button id="addBlock" class="btn danger">Add block</button>
-        </div>
-        <div id="blockChips" class="chips"></div>
+        <div class="ov-grid">
+            <!-- Allow column -->
+            <div class="ov-col">
+                <div class="ov-col-head badge-allow">Allow</div>
+                <div class="row addline">
+                    <input type="text" id="allowInput" placeholder="extmaps-api.yandex.net" inputmode="url" autocomplete="off" />
+                    <button id="addAllow" class="btn" aria-label="Add allow">Add</button>
+                </div>
+                <div id="allowChips" class="chips" role="list"></div>
+                <div class="row right">
+                    <button id="clearAllow" class="btn subtle">Clear allow</button>
+                </div>
+            </div>
 
-        <div class="row right">
-            <button id="clearAllow" class="btn subtle">Clear allow</button>
-            <button id="clearBlock" class="btn subtle">Clear block</button>
+            <!-- Block column -->
+            <div class="ov-col">
+                <div class="ov-col-head badge-block">Block</div>
+                <div class="row addline">
+                    <input type="text" id="blockInput" placeholder="offerwall.yandex.net" inputmode="url" autocomplete="off" />
+                    <button id="addBlock" class="btn danger" aria-label="Add block">Add</button>
+                </div>
+                <div id="blockChips" class="chips" role="list"></div>
+                <div class="row right">
+                    <button id="clearBlock" class="btn subtle">Clear block</button>
+                </div>
+            </div>
         </div>
     </section>
 
     <!-- Data management -->
-    <section class="card">
+    <section class="card" id="dataCard">
         <h2>Data</h2>
+        <p class="hint">Drop a settings JSON anywhere on this page to import it.</p>
         <div class="row wrap gap">
             <button id="exportSettings" class="btn">Export settings</button>
             <label for="importFile" class="btn">Import settings</label>
@@ -152,7 +153,6 @@
 
 <div id="toast" role="status" aria-live="polite"></div>
 
-<!-- Load commons first so DEFAULT_SETTINGS is available -->
 <script src="../common.js"></script>
 <script src="options.js"></script>
 </body>
