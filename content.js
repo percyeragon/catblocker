@@ -59,6 +59,68 @@ function onReady(fn) {
     else fn();
 }
 
+const COMMON_AD_SIZES = [
+    [300,250], [336,280], [320,50], [728,90], [160,600], [300,600], [970,250], [970,90]
+];
+function isCommonAdSize(rect, tol = 8) {
+    const w = Math.round(rect.width), h = Math.round(rect.height);
+    return COMMON_AD_SIZES.some(([W,H]) =>
+        Math.abs(W - w) <= tol && Math.abs(H - h) <= tol
+    );
+}
+
+// Helper: hat der Anchor außer dem Ad-Knoten noch nennenswerten Inhalt?
+function anchorOnlyWraps(node, anchor) {
+    try {
+        const kids = Array.from(anchor.childNodes).filter(n => !(n.nodeType === 3 && !n.nodeValue.trim()));
+        if (kids.length === 1 && kids[0] === node) return true;
+        // Edge: Mini-Deko-Knoten erlaubt (z.B. leeres <div> oder <span> ohne Größe)
+        const other = kids.filter(k => k !== node);
+        if (other.length === 0) return true;
+        if (other.every(k => k.nodeType === 1 && k.getBoundingClientRect &&
+            (k.getBoundingClientRect().width < 4 && k.getBoundingClientRect().height < 4))) {
+            return true;
+        }
+    } catch {}
+    return false;
+}
+
+function rectsOverlap(a, b, tol = 1) {
+    return !(a.right < b.left - tol || a.left > b.right + tol || a.bottom < b.top - tol || a.top > b.bottom + tol);
+}
+
+function scrubSiblingAnchors(container, DOMAIN_RE) {
+    try {
+        const slot = container.parentElement || container;
+        const rC = container.getBoundingClientRect();
+        const anchors = Array.from(slot.querySelectorAll('a[href]'));
+
+        for (const a of anchors) {
+            if (a.contains(container) || container.contains(a)) continue;
+
+            const rA = a.getBoundingClientRect();
+            const touchy =
+                rectsOverlap(rA, rC, 8) ||                    // überlappt optisch
+                Math.abs(rA.top - rC.top) < 10 ||             // gleiche Reihe
+                Math.abs(rA.left - rC.left) < 10;
+
+            // Domain-Hinweis (falls bekannt) verstärkt die Entscheidung:
+            const href = (a.getAttribute('href') || '').toLowerCase();
+            const trackerish = /click|track|redirect|adserver|pxl|tsyndicate/.test(href) || (DOMAIN_RE && DOMAIN_RE.test(href));
+
+            if (touchy || trackerish) {
+                a.removeAttribute('href');
+                a.removeAttribute('target');
+                a.setAttribute('tabindex', '-1');
+                a.style.setProperty('pointer-events','none','important');
+                a.style.setProperty('cursor','default','important');
+                a.setAttribute('rel','noopener noreferrer');
+            }
+        }
+    } catch {}
+}
+
+
 /* ================================
    Loop-Guard (avoid reload ping-pong)
 ================================ */
@@ -388,7 +450,7 @@ function startReplacement() {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["style", "class", "id", "src", "data-ad", "data-advertisement", "aria-label"]
+        attributeFilter: ["style","class","id","src","href","srcdoc","sandbox","data-ad","data-advertisement","aria-label"]
     });
 
     chrome.runtime.onMessage.addListener((msg) => {
@@ -514,6 +576,29 @@ async function scanAndReplace() {
             markCandidate(el);
         });
     } catch {}
+
+    try {
+        document.querySelectorAll('iframe:not([src]), iframe[src=""], iframe[src^="about:blank"], iframe[srcdoc]')
+            .forEach(el => {
+                if (el.__catblockerProcessed) return;
+                if (inHeaderArea(el) || inGenericUiArea(el)) return;
+                if (isYouTubePlayerSubtree(el)) return;
+                if (isYouTubeSite() && isInYouTubeUi(el)) return;
+
+                const r = el.getBoundingClientRect();
+                if (r.width < MIN_WIDTH || r.height < MIN_HEIGHT) return;
+
+                const sbox = (el.getAttribute("sandbox") || "").toLowerCase();
+                const suspiciousSandbox = /allow-scripts|allow-popups|allow-forms/.test(sbox);
+
+                // Heuristik: typische IAB-Größe ODER „gefährliche“ Sandbox-Rechte
+                if (isCommonAdSize(r) || suspiciousSandbox) {
+                    if (isLikelyInterstitial(el)) { neutralizeOverlay(el); return; }
+                    markCandidate(el);
+                }
+            });
+    } catch {}
+
 
     // 2) background-image ads (use DOMAIN_RE)
     try {
@@ -653,6 +738,37 @@ function markCandidate(el) {
 /* ================================
    Replacement: replace node with cat
 ================================ */
+
+function chooseReplacementTarget(node) {
+    // 1) Site-/Slot-Container (generisch + häufige Muster)
+    const genericSlot = node.closest([
+        '[data-ad]','[data-sponsored]','[data-advertisement]',
+        '.ad','.ads','.advert','.advertisement',
+        '.ad-container','.ad-slot','.ad-unit','.ad__slot',
+        '[id^="ad_"]','[id*="-ad"]','[class*=" ad-"]',
+        // häufige Thumb/Teaser-Wrapper
+        '.mn-thumb','.thumb','.teaser','.card','.result'
+    ].join(','));
+
+    if (genericSlot) return genericSlot;
+
+    // 2) Falls im Link verschachtelt → nimm den <a>
+    const a = node.closest('a[href]');
+    if (a) return a;
+
+    // 3) Sonst: Parent, der "a[href]" enthält und ähnlich groß ist (Slot-Heuristik)
+    let p = node.parentElement, best = node, r0 = node.getBoundingClientRect();
+    while (p && p !== document.body) {
+        const ra = p.getBoundingClientRect();
+        const c = p.querySelector('a[href]');
+        const areaFits = (ra.width * ra.height) <= (r0.width * r0.height) * 4; // nicht zu groß
+        if (c && areaFits) { best = p; break; }
+        p = p.parentElement;
+    }
+    return best;
+}
+
+
 async function replaceNodeWithCat(node, opts = {}) {
     const force = true;
     try {
@@ -671,12 +787,13 @@ async function replaceNodeWithCat(node, opts = {}) {
         try { catUrl = await pickCatSrc(); } catch { return; }
         if (!alive) return;
 
-        const rect = node.getBoundingClientRect();
+        const target = chooseReplacementTarget(node);
+        const rect = target.getBoundingClientRect(); // statt node
         const vw = window.innerWidth, vh = window.innerHeight;
 
         // extra guard: if gigantic, neutralize instead of replacing
         if (!force && (rect.width > vw * 0.8 || rect.height > vh * 0.7)) {
-            neutralizeOverlay(node);
+            neutralizeOverlay(target);
             if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
             return;
         }
@@ -686,7 +803,13 @@ async function replaceNodeWithCat(node, opts = {}) {
         const w = Math.max(minW, Math.floor(rect.width))  || (isYouTubeSite() ? 300 : 300);
         const h = Math.max(minH, Math.floor(rect.height)) || (isYouTubeSite() ? 180 : 250);
 
+        const cs = getComputedStyle(node);
+        const origDisplay = cs.display;          // z.B. "inline", "inline-block", "block", "contents", "grid", "flex"
+        const isInlineish = origDisplay === "inline" || origDisplay === "inline-block" || origDisplay === "inline-flex";
+
+
         const container = document.createElement("div");
+
         container.className = "catblocker-container";
         container.style.cssText = `
       all: initial;
@@ -723,8 +846,57 @@ async function replaceNodeWithCat(node, opts = {}) {
 
         container.append(img, badge);
 
-        try { node.replaceWith(container); }
-        catch { node.innerHTML = ""; node.appendChild(container); }
+        container.style.removeProperty("display"); // Display zunächst freimachen
+        if (isInlineish || node.tagName === "IFRAME" || node.tagName === "IMG" || node.tagName === "VIDEO") {
+            container.style.setProperty("display", "inline-flex", "important");
+            container.style.setProperty("vertical-align", cs.verticalAlign || "top", "important");
+        } else if (origDisplay.includes("grid")) {
+            container.style.setProperty("display", "grid", "important");
+        } else if (origDisplay.includes("flex")) {
+            container.style.setProperty("display", "flex", "important");
+        } else {
+            container.style.setProperty("display", origDisplay || "block", "important");
+        }
+
+// Falls Parent ein Flex/Grid-Container ist: Basis/Area nicht verlieren
+        container.style.setProperty("flex", cs.flex || "0 0 auto");
+        container.style.setProperty("flex-basis", cs.flexBasis || "");
+        container.style.setProperty("grid-area", cs.gridArea || "");
+        container.style.setProperty("box-sizing", "border-box", "important");
+// Für Inline-Layouts: kein 100%-Breitziehen erzwingen
+        if (isInlineish) container.style.removeProperty("max-width");
+
+        scrubSiblingAnchors(container, typeof buildDomainRegexFromSettings === "function"
+            ? buildDomainRegexFromSettings(settings) : null);
+
+
+        const anchor = target.closest('a[href]');
+        if (anchor && anchorOnlyWraps(target, anchor)) {
+            // 1) kompletten Anker ersetzen → kein clickthrough mehr
+            try { anchor.replaceWith(container); }
+            catch { anchor.innerHTML = ""; anchor.appendChild(container); }
+        } else {
+            // Fallback: nur Node ersetzen, aber jeden evtl. übergeordneten Anker entwaffnen
+            try { target.replaceWith(container); }
+            catch { target.innerHTML = ""; target.appendChild(container); }
+
+            // Falls container in <a> steckt → Clicks killen
+            const wrapA = container.closest('a[href]');
+            if (wrapA) {
+                wrapA.removeAttribute('href');
+                wrapA.removeAttribute('target');
+                wrapA.setAttribute('rel', 'noopener noreferrer');
+                wrapA.style.setProperty('pointer-events','none','important');
+            }
+        }
+        // blockiere Bubble/Delegation auf Track-Wrappern
+        container.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+        }, { capture: true });
+        container.style.setProperty('pointer-events','auto','important');
+
+
 
         if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
     } catch { /* swallow node errors */ }
