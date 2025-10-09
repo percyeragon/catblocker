@@ -84,7 +84,10 @@ function buildDomainRegexFromSettings(settings) {
         "revcontent",
         "adsystem",
         "adroll",
-        "criteo"
+        "criteo",
+        "adtng",
+        "trafficjunky"
+
     ];
     const extras = (settings?.customBlocklistDomains || []).map(escapeRe);
     const all = base.concat(extras).filter(Boolean);
@@ -108,7 +111,9 @@ function buildIframeSelectorFromSettings(settings) {
         `iframe[src*="criteo"]`,
         `iframe[src*="adroll"]`,
         `iframe[id*="ad"]`,
-        `iframe[name*="ad"]`
+        `iframe[name*="ad"]`,
+        `iframe[src*="adtng"]`,
+        `iframe[src*="trafficjunky"]`,
     ];
     const extras = (settings?.customBlocklistDomains || [])
         .filter(Boolean)

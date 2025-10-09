@@ -618,6 +618,21 @@ async function scanAndReplace() {
         }
     } catch {}
 
+    // 2.5) winzige Tracking-Pixel (<img>)
+    try {
+        const tinyImgs = document.querySelectorAll("img[src]");
+        for (const img of tinyImgs) {
+            if (img.__catblockerProcessed) continue;
+            const w = (img.width || img.naturalWidth || 0);
+            const h = (img.height || img.naturalHeight || 0);
+            const src = (img.getAttribute("src") || "").toLowerCase();
+            if ((w <= 2 && h <= 2) && (DOMAIN_RE.test(src) || /pixel|beacon|track|deep_pixel/.test(src))) {
+                hideNode(img); // nicht ersetzen, nur unsichtbar machen
+            }
+        }
+    } catch {}
+
+
     // send candidates to IO (visible-only processing)
     for (const el of pendingNodes) io.observe(el);
     pendingNodes.clear();
@@ -638,12 +653,13 @@ function markCandidate(el) {
 /* ================================
    Replacement: replace node with cat
 ================================ */
-async function replaceNodeWithCat(node) {
+async function replaceNodeWithCat(node, opts = {}) {
+    const force = true;
     try {
         if (!alive || node.__catblockerProcessed) return;
 
         // never replace interstitials (we neutralize instead)
-        if (isLikelyInterstitial(node)) {
+        if (!force && isLikelyInterstitial(node)) {
             neutralizeOverlay(node);
             if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
             return;
@@ -659,7 +675,7 @@ async function replaceNodeWithCat(node) {
         const vw = window.innerWidth, vh = window.innerHeight;
 
         // extra guard: if gigantic, neutralize instead of replacing
-        if (rect.width > vw * 0.8 || rect.height > vh * 0.7) {
+        if (!force && (rect.width > vw * 0.8 || rect.height > vh * 0.7)) {
             neutralizeOverlay(node);
             if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
             return;

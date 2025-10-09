@@ -56,6 +56,9 @@ const PRESETS = {
         "stats.g.doubleclick.net",
         "mediavisor.doubleclick.net",
         "pagead.l.doubleclick.net",
+        "adtng.com",
+        "a.adtng.com",
+        "trafficjunky.com", "ads.trafficjunky.net",
 
         // Media.net
         "adservetx.media.net",
