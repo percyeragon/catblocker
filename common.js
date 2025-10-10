@@ -8,7 +8,7 @@ const DEFAULT_SETTINGS = {
     enabled: true,
     intensity: "aggressive",           // "conservative" | "balanced" | "aggressive"
     whitelist: [],
-    cmpBypassSourcepoint: true,
+    cmpBypassSourcepoint: false,
     customBlocklistDomains: [
         "adtago.s3.amazonaws.com",
         "analyticsengine.s3.amazonaws.com",

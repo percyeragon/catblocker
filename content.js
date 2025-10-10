@@ -53,12 +53,6 @@ function safeSendMessage(msg) {
    Helpers (safe observe, DOM ready)
 ================================ */
 function isNode(x) { return !!(x && typeof x === "object" && typeof x.nodeType === "number"); }
-function safeObserve(mo, target, options) { if (mo && isNode(target)) { try { mo.observe(target, options); } catch {} } }
-function onReady(fn) {
-    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn, { once: true });
-    else fn();
-}
-
 const COMMON_AD_SIZES = [
     [300,250], [336,280], [320,50], [728,90], [160,600], [300,600], [970,250], [970,90]
 ];
@@ -191,62 +185,6 @@ function isLikelyInterstitial(el) {
 }
 
 /* ================================
-   CMP / Sourcepoint soft bypass
-================================ */
-function isSourcepointNode(el) {
-    if (!el) return false;
-    const id = (typeof el.id === "string") ? el.id : (el.id?.baseVal || "");  // <-- Fix hier
-    if (id && (id.startsWith("sp_message_container_") || id.startsWith("sp_message_iframe_") || id === "sp_veil")) return true;
-
-    if (el.classList && (el.classList.contains("sp_veil") || el.classList.contains("sp_message") || el.classList.contains("sp_message_container"))) return true;
-
-    const src = (el.tagName === "IFRAME") ? (el.getAttribute("src") || "") : "";
-    return /sourcepoint\./i.test(src);
-}
-
-function neutralizeSourcepointNode(el) {
-    try {
-        el.__catblockerProcessed = true;
-        el.setAttribute("aria-hidden", "true");
-        el.removeAttribute("aria-modal");
-        // soft: make it non-interactive and (practically) invisible without display:none:
-        el.style.setProperty("pointer-events", "none", "important");
-        el.style.setProperty("opacity", "0.001", "important");
-        el.style.setProperty("visibility", "hidden", "important");
-        el.style.setProperty("z-index", "-1", "important");
-    } catch {}
-}
-function setupSourcepointBypass() {
-    if (!settings.cmpBypassSourcepoint) return;
-
-    const neutralizeAll = (root) => {
-        root.querySelectorAll?.(
-            '[id^="sp_message_container_"], [id^="sp_message_iframe_"], #sp_veil, .sp_veil, .sp_message, .sp_message_container'
-        ).forEach(el => { if (!el.__catblockerProcessed) neutralizeSourcepointNode(el); });
-    };
-
-    neutralizeAll(document);
-
-    const mo = new MutationObserver((muts) => {
-        for (const m of muts) {
-            m.addedNodes && m.addedNodes.forEach(n => {
-                if (!(n instanceof Element)) return;
-                if (isSourcepointNode(n)) neutralizeSourcepointNode(n);
-                neutralizeAll(n);
-            });
-            if (m.type === "attributes" && m.target instanceof Element && isSourcepointNode(m.target)) {
-                neutralizeSourcepointNode(m.target);
-            }
-        }
-    });
-
-    safeObserve(mo, document.documentElement, {
-        subtree: true, childList: true, attributes: true,
-        attributeFilter: ["id","class","style","aria-modal","aria-hidden"]
-    });
-}
-
-/* ================================
    Neutralize ONLY ad-iframe interstitials
 ================================ */
 function neutralizeOverlay(node) {
@@ -273,24 +211,26 @@ function detectAndHideInterstitials(DOMAIN_RE, adIframeSelector) {
 
     for (const el of candidates) {
         if (el.__catblockerProcessed) continue;
+        // DO NOT touch cookie / consent elements at all — skip them entirely
+        try {
+            const txt = (el.textContent || "").toLowerCase();
+            if (/\b(cookie|consent|preferences|privacy|gdpr|opt-in|optout|opt-out)\b/i.test(txt)) {
+                // leave consent nodes alone
+                continue;
+            }
+        } catch {}
         if (!isLikelyInterstitial(el)) continue;
 
-        // If this interstitial itself (or its iframe) is ad-related → neutralize
+        // existing logic follows, but note: do NOT neutralize sourcepoint/consent now
         const hasAdIframe = !!el.querySelector(adIframeSelector);
-        const text = (el.textContent || "").toLowerCase();
-        const isConsentText = /\bcookie|consent|preferences|privacy|gdpr\b/i.test(text);
-
-        if (hasAdIframe && !isConsentText) {
+        // we only neutralize non-consent interstitials that contain ad-iframes
+        if (hasAdIframe) {
             neutralizeOverlay(el);
             touched++;
             continue;
         }
 
-        // Sourcepoint-specific containers (soft bypass already handles most)
-        if (settings.cmpBypassSourcepoint && isSourcepointNode(el)) {
-            neutralizeSourcepointNode(el);
-            touched++;
-        }
+        // other cases previously touching sourcepoint are removed
     }
 
     if (touched > 0 && !window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(4000);
@@ -318,7 +258,6 @@ function getCandidateScrollContainers() {
 }
 
 function captureScrollPos() {
-    const docEl = document.scrollingElement || document.documentElement;
     return {
         winX: window.scrollX,
         winY: window.scrollY,
@@ -429,7 +368,6 @@ function stopUnlockDaemon() {
     if (!settings.enabled || (settings.whitelist || []).includes(host)) return;
 
     injectCatblockerStylesOnce();
-    setupSourcepointBypass();
     startReplacement();
 })();
 
