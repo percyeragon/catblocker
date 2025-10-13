@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "CatBlocker — Replace Ads with Cats",
   "description": "Hides ads and replaces them with wholesome cat pictures. Toggle, whitelist, and live counter included.",
-  "version": "1.0.16",
+  "version": "1.0.17",
   "action": {
     "default_popup": "popup/popup.html",
     "default_title": "CatBlocker"
