@@ -13,6 +13,7 @@ let settings = {
     customBlocklistDomains: [],
     allowDomains: [],
     blockDomains: [],
+    showDismiss: true,
     theme: "light"
 };
 
@@ -149,9 +150,12 @@ function injectCatblockerStylesOnce() {
       object-fit: cover !important; overflow: clip !important; overflow-clip-margin: content-box; contain: paint;
     }
     .catblocker-container { contain: layout paint style !important; isolation: isolate !important; will-change: contents; }
+    
   `;
     document.documentElement.appendChild(style);
 }
+
+
 
 /* ================================
    YouTube guards
@@ -545,9 +549,9 @@ async function scanAndReplace() {
     try {
         document.querySelectorAll(adIframeSelector).forEach(el => {
             if (el.__catblockerProcessed) return;
+            if (el.closest('.catblocker-container, .catblocker-dismissed')) return;
             if (inHeaderArea(el) || inGenericUiArea(el)) return;
             if (isYouTubePlayerSubtree(el)) return;
-            if (isInComments(el)) return;
             if (isYouTubeSite() && isInYouTubeUi(el)) return;
             if (isLikelyInterstitial(el)) { neutralizeOverlay(el); return; }
             markCandidate(el);
@@ -558,6 +562,7 @@ async function scanAndReplace() {
         document.querySelectorAll('iframe:not([src]), iframe[src=""], iframe[src^="about:blank"], iframe[srcdoc]')
             .forEach(el => {
                 if (el.__catblockerProcessed) return;
+                if (el.closest('.catblocker-container, .catblocker-dismissed')) return;
                 if (inHeaderArea(el) || inGenericUiArea(el)) return;
                 if (isYouTubePlayerSubtree(el)) return;
                 if (isYouTubeSite() && isInYouTubeUi(el)) return;
@@ -582,7 +587,7 @@ async function scanAndReplace() {
         const bgCandidates = document.querySelectorAll("div, section, aside, a");
         for (const el of bgCandidates) {
             if (el.__catblockerProcessed) continue;
-            if (el.closest('.catblocker-container')) continue;
+            if (el.closest('.catblocker-container, .catblocker-dismissed')) continue;
             if (inHeaderArea(el) || inGenericUiArea(el)) continue;
             if (isYouTubePlayerSubtree(el)) continue;
             if (isYouTubeSite() && isInYouTubeUi(el)) continue;
@@ -706,10 +711,106 @@ async function scanAndReplace() {
 /* ================================
    Mark candidate for replacement
 ================================ */
+// --- Phase 1: scoring-based candidate gating (EN/US aggressive) ---
+function __cb_getIntensityThreshold(intensity){
+    // lower thresholds for aggressive preference
+    if (intensity === "aggressive") return 2;
+    if (intensity === "gentle" || intensity === "conservative") return 4;
+    return 3; // balanced
+}
+
+function __cb_hasSafeExclusion(el){
+    try {
+        // avoid critical UI containers and controls
+        if (el.closest('nav, header, footer, form, dialog, [role="dialog"], [role="search"], [data-consent], #cookie, #consent')) return true;
+        if (el.closest('main article') && el.closest('figure, .media, .article-media')) return true;
+        if (el.closest('video, audio')) return true;
+        // obvious site UI widgets
+        if (el.closest('.search, .site-header, .site-footer, .newsletter, .subscribe, .login, .signup')) return true;
+    } catch {}
+    return false;
+}
+
+function __cb_texty(s){ return (s||"").toLowerCase(); }
+
+function __cb_collectAttrStrings(el){
+    const acc = [];
+    try {
+        const attrs = ['src','href','data-src','data-href','srcset','data-ad','data-adslot','data-ad-unit','aria-label','title'];
+        for (const a of attrs) { const v = el.getAttribute && el.getAttribute(a); if (v) acc.push(String(v)); }
+        // also class and id
+        if (el.className) acc.push(String(el.className));
+        if (el.id) acc.push(String(el.id));
+        // include immediate child <img>/<source> src/srcset
+        const img = el.querySelector && el.querySelector('img, source');
+        if (img) {
+            ['src','srcset','data-src'].forEach(a=>{ const v = img.getAttribute(a); if (v) acc.push(String(v)); });
+        }
+    } catch {}
+    return __cb_texty(acc.join(' '));
+}
+
+function __cb_computeAdScore(el, DOMAIN_RE){
+    let score = 0;
+    try {
+        const tag = (el.tagName||'').toLowerCase();
+        const cls = __cb_texty(el.className||'');
+        const id  = __cb_texty(el.id||'');
+
+        // 1) Selector-ish hints
+        if (/(^|\s)ad(s)?(\s|$|[-_])/.test(cls) || /(advert|advertisement|ad-slot|ad__slot|ad-container|ad-unit|ad-wrapper)/.test(cls)) score += 2;
+        if (/sponsor|sponsored|promoted|ad-marker/.test(cls)) score += 2;
+        if (/ad|advert/.test(id) || /sponsor|promo/.test(id)) score += 1;
+
+        // 2) Attribute hints (aria/data/title/text)
+        const attrs = __cb_collectAttrStrings(el);
+        if (/advertisement|sponsored|promoted|partner content|paid/.test(attrs)) score += 2;
+        if (/data-google-query-id|gpt|dfp/.test(attrs)) score += 2;
+
+        // 3) Size heuristic
+        const r = el.getBoundingClientRect ? el.getBoundingClientRect() : {width:0,height:0};
+        if (r.width >= MIN_WIDTH && r.height >= MIN_HEIGHT && isCommonAdSize(r)) score += 1;
+
+        // 4) Vendor/domain hints from attributes
+        if (DOMAIN_RE && DOMAIN_RE.test(attrs)) score += 3; // strong signal
+
+        // 5) iFrame special
+        if (tag === 'iframe'){
+            const nameAttr = __cb_texty(el.getAttribute('name')||'');
+            if (/ad/.test(nameAttr) || /ad/.test(id)) score += 1;
+            if (el.hasAttribute && (el.hasAttribute('srcdoc') || !el.getAttribute('src'))) score += 1;
+        }
+
+        // cap score to avoid runaway
+        if (score > 10) score = 10;
+    } catch {}
+    return score;
+}
+
 function markCandidate(el) {
     if (totalReplaced >= MAX_PER_PAGE) return;
-    if (el.__catblockerProcessed) return;
-    pendingNodes.add(el);
+    if (!el || el.__catblockerProcessed) return;
+    if (el.__cbGateSeen) return; // avoid repeated scoring of the same node
+
+    // Safe exclusions first
+    if (__cb_hasSafeExclusion(el)) { el.__cbGateSeen = true; return; }
+
+    // Compute score (use last built DOMAIN_RE if available via closure in scan)
+    // If not available, fall back to a generic one
+    const DOMAIN_RE = (typeof buildDomainRegexFromSettings === 'function')
+        ? buildDomainRegexFromSettings(settings)
+        : /(doubleclick|googlesyndication|adservice|adnxs|taboola|outbrain|revcontent|adsystem|adroll|criteo|adtng|trafficjunky)/i;
+
+    const score = __cb_computeAdScore(el, DOMAIN_RE);
+    const threshold = __cb_getIntensityThreshold(settings.intensity || 'balanced');
+
+    let pass = score >= threshold;
+
+    if (pass) {
+        pendingNodes.add(el);
+    }
+    // mark as seen to avoid rework; replacement will flip __catblockerProcessed
+    el.__cbGateSeen = true;
 }
 
 /* ================================
@@ -800,11 +901,31 @@ async function replaceNodeWithCat(node, opts = {}) {
       border-radius: 8px !important;
       background: #0003 !important;
       position: relative !important;
+      contain: paint !important;
+      isolation: isolate !important;
+      view-transition-name: none !important;
     `;
+        container.setAttribute("tabindex", "0");
 
         const img = document.createElement("img");
         img.src = catUrl;
         img.alt = "Ad replaced by a cat 😺";
+        img.loading = "lazy";
+        img.decoding = "async";
+        img.style.cssText = `
+      display: block !important;
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover !important;
+      object-position: center center !important;
+      overflow: clip !important;
+      overflow-clip-margin: content-box;
+      contain: paint !important;
+      view-transition-name: none !important;
+      transition: opacity .18s ease !important;
+      opacity: 1 !important;
+`;
+
 
         const badge = document.createElement("div");
         badge.textContent = "CatBlocker";
@@ -820,6 +941,45 @@ async function replaceNodeWithCat(node, opts = {}) {
       color: #fff !important;
       border-radius: 6px !important;
     `;
+
+        // Optional dismiss button (×)
+        if (settings && settings.showDismiss !== false) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "cb-dismiss";
+            btn.textContent = "×";
+            btn.setAttribute("aria-label", "Dismiss cat");
+            btn.title = "Dismiss";
+            btn.style.cssText = `
+        all: initial;
+        position: absolute !important;
+        top: 6px !important;
+        right: 6px !important;
+        width: 22px !important;
+        height: 22px !important;
+        line-height: 22px !important;
+        text-align: center !important;
+        font-family: system-ui, sans-serif !important;
+        font-size: 16px !important;
+        color: #fff !important;
+        background: #000a !important;
+        border-radius: 50% !important;
+        cursor: pointer !important;
+        z-index: 2 !important;
+        pointer-events: auto !important;
+      `;
+            const dismiss = (ev) => {
+                try { ev && (ev.stopPropagation(), ev.preventDefault()); } catch {}
+                const parent = container.parentElement;
+                if (parent) parent.classList.add("catblocker-dismissed");
+                try { container.remove(); } catch {}
+            };
+            btn.addEventListener("click", dismiss);
+            btn.addEventListener("keydown", (e) => {
+                if (e.key === "Enter" || e.key === " " || e.key === "Escape") dismiss(e);
+            });
+            container.appendChild(btn);
+        }
 
         container.append(img, badge);
 
@@ -863,14 +1023,20 @@ async function replaceNodeWithCat(node, opts = {}) {
                 wrapA.removeAttribute('href');
                 wrapA.removeAttribute('target');
                 wrapA.setAttribute('rel', 'noopener noreferrer');
-                wrapA.style.setProperty('pointer-events','none','important');
+                // Do NOT disable pointer-events globally to keep dismiss clickable
+                wrapA.style.setProperty('cursor','default','important');
             }
         }
-        // blockiere Bubble/Delegation auf Track-Wrappern
-        container.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-        }, { capture: true });
+        // blockiere Bubble/Delegation auf Track-Wrappern – aber lasse den Dismiss-Button zu
+        const blockIfNotDismiss = (e) => {
+            const isDismiss = !!(e.target && e.target.closest('.cb-dismiss'));
+            if (!isDismiss) {
+                try { e.preventDefault(); } catch {}
+                try { e.stopPropagation(); } catch {}
+            }
+        };
+        container.addEventListener('click', blockIfNotDismiss, { capture: true });
+        container.addEventListener('auxclick', blockIfNotDismiss, { capture: true });
         container.style.setProperty('pointer-events','auto','important');
 
 

@@ -23,6 +23,8 @@ const DEFAULT_SETTINGS = {
     // Per-host overrides
     allowDomains: ["extmaps-api.yandex.net"],
     blockDomains: [],
+    // UI
+    showDismiss: true,
     // UI theme ("light" | "dark" | undefined)
     theme: "light"
 };

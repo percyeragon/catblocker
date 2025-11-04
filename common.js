@@ -27,7 +27,8 @@ const DEFAULT_SETTINGS = {
     // Per-host overrides
     allowDomains: ["extmaps-api.yandex.net"],  // e.g., allow Yandex maps API
     blockDomains: [],   // e.g., explicitly block a noisy host
-    // UI theme
+    // UI
+    showDismiss: true,   // show “×” on placeholders
     theme: "light"
 };
 
