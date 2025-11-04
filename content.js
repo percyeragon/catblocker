@@ -9,8 +9,11 @@ let settings = {
     enabled: true,
     intensity: "aggressive",
     whitelist: [],
-    cmpBypassSourcepoint: true,
-    customBlocklistDomains: []
+    cmpBypassSourcepoint: false,
+    customBlocklistDomains: [],
+    allowDomains: [],
+    blockDomains: [],
+    theme: "light"
 };
 
 let observer = null;              // MutationObserver for DOM changes
@@ -352,6 +355,41 @@ function stopUnlockDaemon() {
 
 
 /* ================================
+   Toast helper
+================================ */
+function showToast(text, duration=1400) {
+    try {
+        const id = "catblocker-toast";
+        let el = document.getElementById(id);
+        if (!el) {
+            el = document.createElement("div");
+            el.id = id;
+            Object.assign(el.style, {
+                position: "fixed",
+                zIndex: 2147483647,
+                left: "50%",
+                bottom: "24px",
+                transform: "translateX(-50%)",
+                background: "rgba(0,0,0,0.8)",
+                color: "#fff",
+                padding: "8px 12px",
+                borderRadius: "8px",
+                fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+                fontSize: "12px",
+                boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+                opacity: "0",
+                transition: "opacity .18s ease"
+            });
+            document.documentElement.appendChild(el);
+        }
+        el.textContent = text;
+        el.style.opacity = "1";
+        clearTimeout(showToast._t);
+        showToast._t = setTimeout(() => { el.style.opacity = "0"; }, duration);
+    } catch {}
+}
+
+/* ================================
    Init
 ================================ */
 (async function init() {
@@ -394,6 +432,7 @@ function startReplacement() {
     chrome.runtime.onMessage.addListener((msg) => {
         if (!alive) return;
         if (msg?.type === "CATBLOCKER_FORCE_SCAN") scheduleScan();
+        if (msg?.type === "CATBLOCKER_TOAST" && msg.text) showToast(msg.text);
     });
 }
 

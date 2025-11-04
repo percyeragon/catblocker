@@ -11,6 +11,7 @@ const DEFAULT_SETTINGS = {
         "analytics.s3.amazonaws.com",
         "advice-ads.s3.amazonaws.com"
     ],
+    // Category toggles (network-level blocking)
     categories: {
         ads: true,
         analytics: false,
@@ -18,7 +19,12 @@ const DEFAULT_SETTINGS = {
         errorTrackers: false,
         oems: false,
         mix: false
-    }
+    },
+    // Per-host overrides
+    allowDomains: ["extmaps-api.yandex.net"],
+    blockDomains: [],
+    // UI theme ("light" | "dark" | undefined)
+    theme: "light"
 };
 
 // Session badge
@@ -163,9 +169,20 @@ function ruleIdForString(s) {
 }
 function buildBlockRule(hostOrFragment) {
     return {
-        id: ruleIdForString(hostOrFragment),
+        id: ruleIdForString("BLK:" + hostOrFragment),
         priority: 1,
         action: { type: "block" },
+        condition: {
+            urlFilter: hostOrFragment,
+            resourceTypes: ["script","xmlhttprequest","sub_frame","image","media","font"]
+        }
+    };
+}
+function buildAllowRule(hostOrFragment) {
+    return {
+        id: ruleIdForString("ALW:" + hostOrFragment),
+        priority: 10, // must be higher than block to win
+        action: { type: "allow" },
         condition: {
             urlFilter: hostOrFragment,
             resourceTypes: ["script","xmlhttprequest","sub_frame","image","media","font"]
@@ -182,10 +199,17 @@ async function syncDynamicRulesFromSettings(settings) {
         if (enabledCats[key]) list.forEach(d => domains.add(d));
     });
 
-    // Custom-Liste hinzufügen
+    // Custom-Liste hinzufügen (Block)
     (settings.customBlocklistDomains || []).forEach(d => domains.add(d));
 
-    const desiredRules = [...domains].map(buildBlockRule);
+    // Explizite Overrides
+    const blockList = new Set(settings.blockDomains || []);
+    const allowList = new Set(settings.allowDomains || []);
+    blockList.forEach(d => domains.add(d));
+
+    const blockRules = [...domains].map(buildBlockRule);
+    const allowRules = [...allowList].map(buildAllowRule);
+    const desiredRules = blockRules.concat(allowRules);
 
     try {
         const existing = await chrome.declarativeNetRequest.getDynamicRules();
@@ -329,14 +353,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ---- Command optional
 chrome.commands?.onCommand.addListener(async (command) => {
-    if (command !== "toggle-enabled") return;
-    const s = await getSettings();
-    const next = { ...s, enabled: !s.enabled };
-    await saveSettings(next);
-    if (!next.enabled) { setBadgeCount(0); session.replacedCount = 0; }
-    const tabs = await chrome.tabs.query({ url: ["http://*/*","https://*/*"] });
-    for (const t of tabs) {
-        try { chrome.tabs.sendMessage(t.id, { type: "CATBLOCKER_FORCE_SCAN" }); } catch {}
+    if (command === "toggle-enabled") {
+        const s = await getSettings();
+        const next = { ...s, enabled: !s.enabled };
+        await saveSettings(next);
+        if (!next.enabled) { setBadgeCount(0); session.replacedCount = 0; }
+        const tabs = await chrome.tabs.query({ url: ["http://*/*","https://*/*"] });
+        for (const t of tabs) {
+            try { chrome.tabs.sendMessage(t.id, { type: "CATBLOCKER_FORCE_SCAN" }); } catch {}
+        }
+        return;
+    }
+
+    if (command === "replace-now") {
+        try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (tab?.id) {
+                chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_FORCE_SCAN" });
+            }
+        } catch {}
+        return;
     }
 });
 

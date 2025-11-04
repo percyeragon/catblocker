@@ -6,7 +6,7 @@
 ================================ */
 const DEFAULT_SETTINGS = {
     enabled: true,
-    intensity: "aggressive",           // "conservative" | "balanced" | "aggressive"
+    intensity: "aggressive",           // "gentle" (aka conservative) | "balanced" | "aggressive"
     whitelist: [],
     cmpBypassSourcepoint: false,
     customBlocklistDomains: [
@@ -24,8 +24,11 @@ const DEFAULT_SETTINGS = {
         oems: false,
         mix: false
     },
-    allowDomains: ["extmaps-api.yandex.net"],  // z.B. ["extmaps-api.yandex.net"]
-    blockDomains: []   // z.B. ["offerwall.yandex.net"]
+    // Per-host overrides
+    allowDomains: ["extmaps-api.yandex.net"],  // e.g., allow Yandex maps API
+    blockDomains: [],   // e.g., explicitly block a noisy host
+    // UI theme
+    theme: "light"
 };
 
 // Merge current settings with defaults
@@ -172,7 +175,8 @@ function chooseSelectors(intensity = "balanced") {
         '.gpt-ad', '.dfp-ad'
     ]);
 
-    if (intensity === "conservative") return conservative;
+    // Backward compatibility: "gentle" maps to "conservative"
+    if (intensity === "gentle" || intensity === "conservative") return conservative;
     if (intensity === "aggressive") return aggressive;
     return balanced;
 }
