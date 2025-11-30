@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = {
     // Per-host overrides
     allowDomains: ["extmaps-api.yandex.net"],  // e.g., allow Yandex maps API
     blockDomains: [],   // e.g., explicitly block a noisy host
+    overrides: {},      // { [hostname]: { enabled?: boolean, intensity?: "gentle"|"balanced"|"aggressive"|"ultra" } }
     // UI
     showDismiss: true,   // show “×” on placeholders
     theme: "light"
@@ -186,7 +187,17 @@ function chooseSelectors(intensity = "balanced") {
         '[class*="native-ad"]',
         '[class*="promoted"]',
         '[class*="sponsor"]',
-        '.gpt-ad', '.dfp-ad'
+        '.gpt-ad', '.dfp-ad',
+        '[class*="ad_wrapper"], [class*="adwrapper"]',
+        '[class*="adslot"], [id*="adslot"]',
+        '[class*="advert"], [id*="advert"]',
+        '[data-ad], [data-ads], [data-advert], [data-advertisement]',
+        // sponsored/article placements
+        'article[class*="sponsored"], article[class*="promoted"]',
+        // generic slots often used for banners
+        '.slot, .ad-slot, .banner-slot',
+        // sizes hinted via attributes
+        '[data-dim*="300x250"], [data-size*="300x250"]',
     ]);
 
     // Backward compatibility: "gentle" maps to "conservative"

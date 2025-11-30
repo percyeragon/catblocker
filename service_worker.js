@@ -23,6 +23,7 @@ const DEFAULT_SETTINGS = {
     // Per-host overrides
     allowDomains: ["extmaps-api.yandex.net"],
     blockDomains: [],
+    overrides: {},
     // UI
     showDismiss: true,
     // UI theme ("light" | "dark" | undefined)
@@ -254,6 +255,16 @@ chrome.runtime.onInstalled.addListener(async () => {
             title: "CatBlocker: Block this domain",
             contexts: ["page"]
         });
+        chrome.contextMenus.create({
+            id: "catblocker-replace-now",
+            title: "CatBlocker: Replace ads now",
+            contexts: ["page"]
+        });
+        chrome.contextMenus.create({
+            id: "catblocker-toggle-whitelist",
+            title: "CatBlocker: Toggle whitelist for this domain",
+            contexts: ["page"]
+        });
     } catch {}
     const s = await getSettings();
     await syncDynamicRulesFromSettings(s);
@@ -266,15 +277,40 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-    if (info.menuItemId !== "catblocker-block-domain" || !tab?.url) return;
+    if (!tab?.url) return;
     try {
         const u = new URL(tab.url);
-        const domain = u.hostname;
+        const domain = u.hostname.replace(/^www\./, "");
         const s = await getSettings();
-        const next = { ...s, customBlocklistDomains: Array.from(new Set([...(s.customBlocklistDomains||[]), domain])) };
-        await saveSettings(next);
-        await syncDynamicRulesFromSettings(next);
-        if (tab.id) chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_TOAST", text: `Blocked ${domain}` });
+
+        if (info.menuItemId === "catblocker-block-domain") {
+            const next = { ...s, customBlocklistDomains: Array.from(new Set([...(s.customBlocklistDomains||[]), domain])) };
+            await saveSettings(next);
+            await syncDynamicRulesFromSettings(next);
+            if (tab.id) chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_TOAST", text: `Blocked ${domain}` });
+            return;
+        }
+
+        if (info.menuItemId === "catblocker-replace-now") {
+            if (tab.id) {
+                try { await chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_FORCE_SCAN" }); } catch {}
+                if (tab.id) chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_TOAST", text: "Scan triggered" });
+            }
+            return;
+        }
+
+        if (info.menuItemId === "catblocker-toggle-whitelist") {
+            const set = new Set([...(s.whitelist || [])]);
+            const had = set.has(domain);
+            if (had) set.delete(domain); else set.add(domain);
+            const next = { ...s, whitelist: Array.from(set) };
+            await saveSettings(next);
+            if (tab.id) {
+                chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_TOAST", text: had ? `Removed ${domain} from whitelist` : `Whitelisted ${domain}` });
+                try { await chrome.tabs.sendMessage(tab.id, { type: "CATBLOCKER_FORCE_SCAN" }); } catch {}
+            }
+            return;
+        }
     } catch {}
 });
 
@@ -292,7 +328,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === "CATBLOCKER_GET_SETTINGS") {
         (async () => {
             const s = await getSettings();
-            sendResponse({ ok: true, settings: s });
+            const rawHost = (msg?.hostname || "").toString();
+            let host = "";
+            try {
+                host = rawHost.trim().toLowerCase().replace(/^www\./, "");
+            } catch {}
+
+            function resolveEffective(settings, hostname){
+                const eff = { ...settings };
+                if (!hostname) return eff;
+                // Whitelist short-circuit: disabled if whitelisted
+                if ((settings.whitelist || []).includes(hostname)) {
+                    eff.enabled = false;
+                    return eff;
+                }
+                const ov = (settings.overrides || {})[hostname];
+                if (ov && typeof ov === 'object') {
+                    if (typeof ov.enabled === 'boolean') eff.enabled = ov.enabled;
+                    if (typeof ov.intensity === 'string') eff.intensity = ov.intensity;
+                }
+                return eff;
+            }
+
+            const effective = resolveEffective(s, host);
+            sendResponse({ ok: true, settings: s, effective, hostname: host });
         })();
         return true;
     }
