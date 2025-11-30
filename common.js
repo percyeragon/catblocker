@@ -90,7 +90,14 @@ function buildDomainRegexFromSettings(settings) {
         "adroll",
         "criteo",
         "adtng",
-        "trafficjunky"
+        "trafficjunky",
+        // modest expansion of common ad/tracker vendors
+        "adform",
+        "rubicon",
+        "pubmatic",
+        "smartadserver",
+        "teads",
+        "moatads"
 
     ];
     const extras = (settings?.customBlocklistDomains || []).map(escapeRe);
@@ -114,6 +121,12 @@ function buildIframeSelectorFromSettings(settings) {
         `iframe[src*="revcontent"]`,
         `iframe[src*="criteo"]`,
         `iframe[src*="adroll"]`,
+        `iframe[src*="adform"]`,
+        `iframe[src*="rubicon"]`,
+        `iframe[src*="pubmatic"]`,
+        `iframe[src*="smartadserver"]`,
+        `iframe[src*="teads"]`,
+        `iframe[src*="moatads"]`,
         `iframe[id*="ad"]`,
         `iframe[name*="ad"]`,
         `iframe[src*="adtng"]`,
@@ -187,15 +200,47 @@ function chooseSelectors(intensity = "balanced") {
 ================================ */
 const CATS = Array.from({ length: 81 }, (_, i) => `cat${i + 1}.jpg`);
 
-let __lastCat = "";
+// Simple recent-history to avoid immediate repeats across calls
+const __recentCats = [];
+const __recentMax = 5;
+const __preloadCache = new Map(); // url -> Image
+
+function __preload(url) {
+    try {
+        if (!url || __preloadCache.has(url)) return;
+        const img = new Image();
+        img.decoding = "async";
+        img.loading = "eager";
+        img.src = url;
+        __preloadCache.set(url, img);
+        // best-effort: drop cache entry after some time to free memory
+        setTimeout(() => { try { __preloadCache.delete(url); } catch {} }, 30000);
+    } catch {}
+}
+
 async function pickCatSrc() {
     if (!CATS.length) return chrome.runtime.getURL("cats/placeholder.png");
-    for (let i = 0; i < 4; i++) {
-        const file = CATS[Math.floor(Math.random() * CATS.length)];
-        const url = chrome.runtime.getURL("cats/" + file);
-        if (url !== __lastCat) { __lastCat = url; return url; }
-    }
-    return chrome.runtime.getURL("cats/" + CATS[0]);
+
+    // Prefer cats not in recent history
+    const pool = CATS.slice();
+    const notRecent = pool.filter(f => !__recentCats.includes(f));
+    const candidates = (notRecent.length ? notRecent : pool);
+
+    const file = candidates[Math.floor(Math.random() * candidates.length)];
+    const url = chrome.runtime.getURL("cats/" + file);
+
+    // update recent history
+    __recentCats.push(file);
+    while (__recentCats.length > __recentMax) __recentCats.shift();
+
+    // opportunistically preload a different next image
+    try {
+        const nextChoices = CATS.filter(f => f !== file && !__recentCats.includes(f));
+        const nextFile = (nextChoices.length ? nextChoices : CATS).find(Boolean);
+        if (nextFile) __preload(chrome.runtime.getURL("cats/" + nextFile));
+    } catch {}
+
+    return url;
 }
 
 /* ================================
