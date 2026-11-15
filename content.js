@@ -1116,32 +1116,90 @@ async function replaceNodeWithCat(node, opts = {}) {
             const btn = document.createElement("button");
             btn.type = "button";
             btn.className = "cb-dismiss";
-            btn.textContent = "×";
             btn.setAttribute("aria-label", "Dismiss cat");
             btn.title = "Dismiss";
+            // SVG cross instead of the "×" glyph: glyph position depends on font metrics,
+            // the SVG is centered exactly via flexbox
+            const SVG_NS = "http://www.w3.org/2000/svg";
+            const svg = document.createElementNS(SVG_NS, "svg");
+            svg.setAttribute("viewBox", "0 0 10 10");
+            svg.setAttribute("width", "10");
+            svg.setAttribute("height", "10");
+            svg.setAttribute("aria-hidden", "true");
+            // absolutely centered + hardened against page CSS (svg/button margins, vertical-align, transforms)
+            svg.style.cssText = `
+        all: initial;
+        display: block !important;
+        position: absolute !important;
+        top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;
+        width: 10px !important;
+        height: 10px !important;
+        margin: auto !important;
+        padding: 0 !important;
+        transform: rotate(0deg) !important;
+        transition: transform .2s ease !important;
+        vertical-align: top !important;
+        overflow: visible !important;
+        pointer-events: none !important;
+      `;
+            const path = document.createElementNS(SVG_NS, "path");
+            path.setAttribute("d", "M1 1 L9 9 M9 1 L1 9");
+            path.setAttribute("stroke", "#fff");
+            path.setAttribute("stroke-width", "1.8");
+            path.setAttribute("stroke-linecap", "round");
+            path.style.cssText = "fill:none !important; stroke:#fff !important; stroke-width:1.8px !important; stroke-linecap:round !important;";
+            svg.appendChild(path);
+            btn.appendChild(svg);
             btn.style.cssText = `
         all: initial;
         position: absolute !important;
         top: 6px !important;
         right: 6px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
         width: 22px !important;
         height: 22px !important;
-        line-height: 22px !important;
-        text-align: center !important;
-        font-family: system-ui, sans-serif !important;
-        font-size: 16px !important;
-        color: #fff !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        border: 0 !important;
         background: #000a !important;
         border-radius: 50% !important;
         cursor: pointer !important;
         z-index: 2 !important;
         pointer-events: auto !important;
+        transform: scale(1) !important;
+        transition: transform .15s ease, background-color .15s ease !important;
       `;
+
+            // Hover/focus animation (inline styles, since our inline !important beats any :hover rule)
+            const reduceMotion = (() => {
+                try { return matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; }
+            })();
+            const setActive = (on) => {
+                btn.style.setProperty("background", on ? "#000d" : "#000a", "important");
+                if (reduceMotion) return;
+                btn.style.setProperty("transform", on ? "scale(1.12)" : "scale(1)", "important");
+                svg.style.setProperty("transform", on ? "rotate(90deg)" : "rotate(0deg)", "important");
+            };
+            btn.addEventListener("mouseenter", () => setActive(true));
+            btn.addEventListener("mouseleave", () => setActive(false));
+            btn.addEventListener("focus", () => setActive(true));
+            btn.addEventListener("blur", () => setActive(false));
             const dismiss = (ev) => {
                 try { ev && (ev.stopPropagation(), ev.preventDefault()); } catch {}
+                if (container.__cbDismissing) return;
+                container.__cbDismissing = true;
                 const parent = container.parentElement;
                 if (parent) parent.classList.add("catblocker-dismissed");
-                try { container.remove(); } catch {}
+                if (reduceMotion) { try { container.remove(); } catch {} return; }
+                // fade + shrink out, then remove
+                container.style.setProperty("transition", "opacity .2s ease, transform .2s ease", "important");
+                container.style.setProperty("opacity", "0", "important");
+                container.style.setProperty("transform", "scale(.96)", "important");
+                container.style.setProperty("pointer-events", "none", "important");
+                setTimeout(() => { try { container.remove(); } catch {} }, 220);
             };
             btn.addEventListener("click", dismiss);
             btn.addEventListener("keydown", (e) => {
