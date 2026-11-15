@@ -247,6 +247,16 @@ function bumpBadge(amount = 1) {
     }
 }
 
+// ---- Uninstall feedback page (opened by Chrome after the extension is removed)
+const UNINSTALL_URL = "https://percyeragon.github.io/catblocker/uninstall.html";
+function registerUninstallUrl() {
+    try {
+        const v = encodeURIComponent(chrome.runtime.getManifest().version);
+        chrome.runtime.setUninstallURL(`${UNINSTALL_URL}?v=${v}`);
+    } catch {}
+}
+registerUninstallUrl();
+
 // ---- Context Menu
 chrome.runtime.onInstalled.addListener(async () => {
     try {

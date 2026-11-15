@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>CatBlocker – Sorry to see you go</title>
+    <style>
+        :root {
+            --bg: #f5f7fb; --card: #ffffff; --text: #1d2330; --muted: #5d6678;
+            --border: #dfe3ec; --accent: #5b7fff; --accent-text: #ffffff; --error: #d64545;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #12151c; --card: #1b1f29; --text: #e6e9f0; --muted: #9aa3b5;
+                --border: #2c3240; --accent: #7a96ff; --accent-text: #0d1020; --error: #ff7b7b;
+            }
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; background: var(--bg); color: var(--text);
+            font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+        .shell { max-width: 560px; margin: 0 auto; padding: 40px 16px; }
+        .card {
+            background: var(--card); border: 1px solid var(--border);
+            border-radius: 14px; padding: 28px 24px;
+        }
+        h1 { font-size: 22px; margin: 0 0 6px; }
+        p.lead { color: var(--muted); margin: 0 0 22px; }
+        fieldset { border: 0; padding: 0; margin: 0 0 18px; }
+        legend { font-weight: 600; margin-bottom: 10px; }
+        .opt {
+            display: flex; gap: 10px; align-items: flex-start;
+            padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+            margin-bottom: 8px; cursor: pointer;
+        }
+        .opt:has(input:checked) { border-color: var(--accent); }
+        .opt input { margin-top: 3px; accent-color: var(--accent); }
+        label.block { display: block; font-weight: 600; margin-bottom: 6px; }
+        textarea {
+            width: 100%; min-height: 96px; resize: vertical; padding: 10px 12px;
+            border: 1px solid var(--border); border-radius: 10px;
+            background: var(--bg); color: var(--text); font: inherit;
+        }
+        .hint { color: var(--muted); font-size: 13px; margin-top: 4px; }
+        .error { color: var(--error); font-size: 14px; min-height: 20px; margin: 8px 0; }
+        button {
+            background: var(--accent); color: var(--accent-text); border: 0;
+            border-radius: 10px; padding: 11px 18px; font: 600 15px/1 inherit; cursor: pointer;
+        }
+        button:disabled { opacity: .6; cursor: default; }
+        .thanks { text-align: center; }
+        .thanks .cat { font-size: 48px; }
+        [hidden] { display: none !important; }
+    </style>
+</head>
+<body>
+<div class="shell">
+    <div class="card" id="formCard">
+        <h1>CatBlocker has been removed 😿</h1>
+        <p class="lead">Before you go: why did you uninstall? It takes 10 seconds and helps a lot.</p>
+
+        <form id="feedback" novalidate>
+            <fieldset>
+                <legend>Reason for uninstalling *</legend>
+                <label class="opt"><input type="radio" name="reason" value="not_blocking" /> Doesn't block enough ads</label>
+                <label class="opt"><input type="radio" name="reason" value="broke_sites" /> It broke websites</label>
+                <label class="opt"><input type="radio" name="reason" value="slow" /> Made my browser slow</label>
+                <label class="opt"><input type="radio" name="reason" value="no_cats" /> I don't want cat pictures</label>
+                <label class="opt"><input type="radio" name="reason" value="other_blocker" /> Switched to another ad blocker</label>
+                <label class="opt"><input type="radio" name="reason" value="temporary" /> Only needed it temporarily</label>
+                <label class="opt"><input type="radio" name="reason" value="other" /> Other</label>
+            </fieldset>
+
+            <label class="block" for="details">Details <span id="detailsReq" hidden>*</span></label>
+            <textarea id="details" name="details" maxlength="2000"
+                      placeholder="Which site broke? What was missing?"></textarea>
+            <div class="hint">Optional unless you chose "Other".</div>
+
+            <div class="error" id="error" role="alert"></div>
+            <button type="submit" id="submit">Send feedback</button>
+        </form>
+    </div>
+
+    <div class="card thanks" id="thanksCard" hidden>
+        <div class="cat">🐱</div>
+        <h1>Thanks for your feedback!</h1>
+        <p class="lead">You can close this tab now.</p>
+    </div>
+</div>
+
+<script>
+    // Where the feedback is POSTed (JSON). E.g. a Formspree form URL or your own endpoint.
+    const FEEDBACK_ENDPOINT = "https://formspree.io/f/YOUR_FORM_ID";
+
+    const params = new URLSearchParams(location.search);
+    const form = document.getElementById("feedback");
+    const details = document.getElementById("details");
+    const errorEl = document.getElementById("error");
+    const submitBtn = document.getElementById("submit");
+    const detailsReq = document.getElementById("detailsReq");
+
+    form.addEventListener("change", () => {
+        detailsReq.hidden = form.reason.value !== "other";
+        errorEl.textContent = "";
+    });
+
+    form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const reason = form.reason.value;
+        const text = details.value.trim();
+
+        if (!reason) { errorEl.textContent = "Please choose a reason."; return; }
+        if (reason === "other" && text.length < 3) {
+            errorEl.textContent = "Please tell us a bit more.";
+            details.focus();
+            return;
+        }
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Sending…";
+        try {
+            const res = await fetch(FEEDBACK_ENDPOINT, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                body: JSON.stringify({
+                    reason,
+                    details: text,
+                    version: params.get("v") || "",
+                    browser: params.get("b") || "",
+                    submittedAt: new Date().toISOString()
+                })
+            });
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            document.getElementById("formCard").hidden = true;
+            document.getElementById("thanksCard").hidden = false;
+        } catch {
+            errorEl.textContent = "Couldn't send feedback. Please try again.";
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Send feedback";
+        }
+    });
+</script>
+</body>
+</html>
