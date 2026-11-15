@@ -33,7 +33,8 @@ const MIN_HEIGHT    = 50;
 ================================ */
 let alive = true;
 
-function teardown() {
+function teardown(ev) {
+    cbLog("teardown by", ev?.type, "trusted=", ev?.isTrusted);
     alive = false;
     try { observer && observer.disconnect(); } catch {}
     try { io && io.disconnect && io.disconnect(); } catch {}
@@ -46,6 +47,16 @@ addEventListener("beforeunload", teardown, { once: true });
 document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "unloaded") teardown();
 });
+
+/* Debug logging: enable per site with  localStorage.setItem("catblocker-debug", "1")  and reload */
+const CB_DEBUG = (() => { try { return localStorage.getItem("catblocker-debug") === "1"; } catch { return false; } })();
+function cbLog(...args) { if (CB_DEBUG) try { console.log("[CatBlocker]", ...args); } catch {} }
+function cbDesc(el) {
+    try {
+        const r = el.getBoundingClientRect();
+        return `${el.tagName}#${el.id || ""}.${String(el.className || "").slice(0, 40)} ${Math.round(r.width)}x${Math.round(r.height)}`;
+    } catch { return String(el); }
+}
 
 function safeSendMessage(msg) {
     try {
@@ -151,7 +162,9 @@ function injectCatblockerStylesOnce() {
       object-fit: cover !important; overflow: clip !important; overflow-clip-margin: content-box; contain: paint;
     }
     .catblocker-container { contain: layout paint style !important; isolation: isolate !important; will-change: contents; }
-    
+    /* filled/collapsed ad slots: hide placeholder boxes drawn via pseudo-elements */
+    .catblocker-slot::before, .catblocker-slot::after { display: none !important; }
+
   `;
     document.documentElement.appendChild(style);
 }
@@ -352,6 +365,240 @@ function queueRedditAds() {
         el.__cbExactTarget = true;                       // replace exactly this element
         pendingNodes.add(el);
     });
+}
+
+/* ================================
+   Known ad slots on other sites → replaced with cats
+   Network rules usually block the ad itself, so these slots stay EMPTY. To still show a
+   cat (instead of an empty or site-hidden box), empty slots get a cat in the slot's
+   intended ad size once the page has settled.
+   - slot:    the element that is replaced once an ad was rendered into it
+   - content: where the ad is rendered inside the slot (default: the slot itself)
+   - size:    slot → [w, h] intended ad size, or null (not fillable → collapsed while empty)
+   - fillInto: slot → element that receives the cat (default: content, else the slot)
+   - wrapper: layout boxes that reserve space for the slot (collapsed if empty and not fillable)
+   - hide:    leftovers next to the slot (e.g. "Ad Feedback" links)
+   - hosts:   restrict to these sites (default: all)
+================================ */
+const KNOWN_AD_SLOTS = [
+    // G+J / RTL network (n-tv.de, stern.de, rtl.de …): slot type is in the wrapper class
+    {
+        slot: ".gujAd",
+        wrapper: '[class*="Ada_wrapper"]',
+        fillInto: (s) => s.closest('[class*="Ada_wrapper"]'),   // empty .gujAd itself is display:none
+        size: (s) => {
+            const c = String(s.closest('[class*="Ada_wrapper"]')?.className || "");
+            if (/Ada_superbanner/.test(c)) return [728, 90];
+            if (/Ada_rectangle/.test(c)) return [300, 250];
+            if (/Ada_skyscraper/.test(c)) return [300, 600];
+            return null;   // teaser / mobile / footer: no fixed size
+        }
+    },
+    // CNN: .ad-slot > .ad#ad_<type>_*, inside header / zone / stack wrappers
+    {
+        hosts: ["cnn.com"],
+        slot: ".ad-slot",
+        content: ".ad",
+        wrapper: ".ad-slot-header__wrapper, .zone__ads, .container__ads",
+        hide: ".ad-slot__feedback, .ad-feedback-link-container",
+        size: (s) => {
+            const id = s.querySelector(".ad")?.id || "";
+            if (/^ad_bnr_/.test(id)) return [728, 90];
+            if (/^ad_rect_/.test(id)) return [300, 250];
+            return null;   // native slots
+        }
+    },
+    // Fox News: .ad-container.ad-w-300.ad-h-250 > .ad
+    // (desktop / desktop-sm variants of the same slot: the site hides the unused one → skipped)
+    {
+        hosts: ["foxnews.com"],
+        slot: ".ad-container",
+        content: ".ad",
+        size: (s) => {
+            const w = +(String(s.className).match(/\bad-w-(\d+)/) || [])[1];
+            const h = +(String(s.className).match(/\bad-h-(\d+)/) || [])[1];
+            return w && h ? [w, h] : null;
+        }
+    },
+    // BILD: own ad delivery (not blocked by the network rules) → ads render into about:blank
+    // iframes inside .ad-wrapper, incl. the fixed left/right "doubleSitebar" (441×911).
+    // Replace each rendered iframe, so wrapper labels and sitebar positioning stay intact.
+    // Empty wrappers are unused on purpose here (e.g. superbanner during a sitebar) → no fill.
+    {
+        hosts: ["bild.de"],
+        slot: ".ad-wrapper",
+        content: "iframe",
+        replaceContent: true
+    }
+];
+
+const SLOT_FILL_DELAY_MS = 2000;   // after window load: give real ads a chance to render first
+let slotFillReady = false;
+
+function armSlotFill() {
+    if (!knownAdSlotConfigs().length) return;
+    const go = () => setTimeout(() => { slotFillReady = true; scheduleScan(); }, SLOT_FILL_DELAY_MS);
+    if (document.readyState === "complete") go();
+    else addEventListener("load", go, { once: true });
+}
+
+function knownAdSlotConfigs() {
+    const h = location.hostname.replace(/^www\./, "");
+    return KNOWN_AD_SLOTS.filter(c => !c.hosts || c.hosts.some(d => h === d || h.endsWith("." + d)));
+}
+
+function renderedAdContent(slot, cfg) {
+    const els = cfg.content ? Array.from(slot.querySelectorAll(cfg.content)) : [slot];
+    return els.filter(e => {
+        const r = e.getBoundingClientRect();
+        return r.width >= MIN_WIDTH && r.height >= MIN_HEIGHT;
+    });
+}
+
+function adSlotFilled(slot, cfg) {
+    return renderedAdContent(slot, cfg).length > 0;
+}
+
+function slotFillSize(slot, cfg) {
+    try {
+        const s = cfg.size && cfg.size(slot);
+        return s && s[0] >= MIN_WIDTH && s[1] >= MIN_HEIGHT ? s : null;
+    } catch { return null; }
+}
+
+/* A rendered ad → replace the whole slot */
+function queueKnownAdSlots() {
+    for (const cfg of knownAdSlotConfigs()) {
+        document.querySelectorAll(cfg.slot).forEach(el => {
+            if (cfg.replaceContent) {
+                // replace each rendered ad element, keep the slot (more ads may render later)
+                renderedAdContent(el, cfg).forEach(c => {
+                    if (c.__catblockerProcessed || c.__cbGateSeen || c.closest(".catblocker-container")) return;
+                    c.__cbGateSeen = true;
+                    c.__cbExactTarget = true;
+                    pendingNodes.add(c);
+                });
+                return;
+            }
+            if (el.__catblockerProcessed || el.__cbGateSeen || el.__cbFilled) return;
+            if (el.closest(".catblocker-container")) return;
+            // slots stay empty until an ad is rendered → only queue once the ad has a size
+            if (!adSlotFilled(el, cfg)) return;
+            el.__cbGateSeen = true;
+            el.__cbExactTarget = true;
+            pendingNodes.add(el);
+        });
+    }
+}
+
+/* Still empty after the page settled → put a cat of the intended ad size into the slot */
+function fillEmptyAdSlots() {
+    if (!slotFillReady) return;
+    for (const cfg of knownAdSlotConfigs()) {
+        document.querySelectorAll(cfg.slot).forEach(slot => {
+            // (__cbGateSeen is not checked: a slot that failed the generic score gate is still a known slot)
+            if (slot.__cbFilled || slot.__catblockerProcessed) return;
+            if (slot.closest(".catblocker-container")) return;
+            if (adSlotFilled(slot, cfg)) return;               // a real ad → queueKnownAdSlots()
+            const size = slotFillSize(slot, cfg);
+            if (!size) return;
+            const into = cfg.fillInto ? cfg.fillInto(slot) : (cfg.content ? slot.querySelector(cfg.content) : slot);
+            if (!into) return;
+
+            // hidden slot/wrapper = not meant for this viewport (mobile/tablet variant) → leave it alone
+            const host = (cfg.wrapper && slot.closest(cfg.wrapper)) || slot.parentElement || slot;
+            if (cfg.wrapper && host.__cbFilledHost) return;    // one cat per wrapper
+            if (host.getBoundingClientRect().width < MIN_WIDTH || getComputedStyle(host).display === "none") return;
+            if (!cfg.fillInto && getComputedStyle(slot).display === "none") return;
+            if (getComputedStyle(into).display === "none") into.style.setProperty("display", "block", "important");
+
+            host.__cbFilledHost = true;
+            slot.__cbFilled = true;
+            slot.__cbGateSeen = true;
+            slot.classList.add("catblocker-slot");             // hides ::before/::after placeholder boxes
+            if (cfg.hide) host.querySelectorAll(cfg.hide).forEach(x => x.style.setProperty("display", "none", "important"));
+
+            // placeholder in ad size → replaced by a cat through the normal pipeline (IO, badge count)
+            const ph = document.createElement("div");
+            ph.style.cssText = `display:block !important; width:${size[0]}px !important; max-width:100% !important;` +
+                ` height:${size[1]}px !important; margin:0 auto !important;`;
+            ph.__cbGateSeen = true;
+            ph.__cbExactTarget = true;
+            ph.__cbSlotFill = true;
+            into.appendChild(ph);
+            pendingNodes.add(ph);
+        });
+    }
+}
+
+/* Empty, non-fillable ad slot wrappers reserve space (min-height/padding) → collapse them.
+   If an ad still renders later, the slot grows again and is replaced by queueKnownAdSlots(). */
+function collapseBox(e) {
+    e.classList.add("catblocker-slot");   // also hides ::before/::after placeholders (see catblocker-style)
+    e.style.setProperty("min-height", "0", "important");
+    e.style.setProperty("padding-top", "0", "important");
+    e.style.setProperty("padding-bottom", "0", "important");
+}
+
+function collapseEmptyAdSlots() {
+    for (const cfg of knownAdSlotConfigs()) {
+        if (!cfg.wrapper) continue;
+        document.querySelectorAll(cfg.wrapper).forEach(w => {
+            if (w.querySelector(".catblocker-container")) return;
+            const slots = Array.from(w.querySelectorAll(cfg.slot));
+            // fillable slots get a cat instead (fillEmptyAdSlots)
+            if (slots.some(s => s.__cbFilled || adSlotFilled(s, cfg) || slotFillSize(s, cfg))) return;
+            collapseBox(w);
+            for (const s of slots) {
+                for (let e = s; e && e !== w; e = e.parentElement) collapseBox(e);
+            }
+            if (cfg.hide) w.querySelectorAll(cfg.hide).forEach(x => x.style.setProperty("display", "none", "important"));
+        });
+    }
+}
+
+/* Labels inside a video player ("Ad 1 of 1 · 0:15" during a pre-roll) must not
+   turn the whole video teaser into an ad unit */
+function isInVideoPlayer(el) {
+    try {
+        const r = el.getBoundingClientRect();
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        for (const v of document.querySelectorAll("video")) {
+            const vr = v.getBoundingClientRect();
+            if (vr.width && vr.height && x >= vr.left && x <= vr.right && y >= vr.top && y <= vr.bottom) return true;
+        }
+    } catch {}
+    return false;
+}
+
+/* "Anzeige"/"Sponsored" label → the ad unit it labels.
+   Prefers the enclosing teaser (article/li/card); otherwise walks up until the
+   container is clearly bigger than the label, without swallowing whole page sections. */
+const AD_LABEL_WORDS = ["sponsored", "promoted", "anzeige", "werbung", "ad", "advertisement", "gesponsert"];
+
+function findLabeledAdContainer(label) {
+    const lr = label.getBoundingClientRect();
+    if (lr.width === 0 || lr.height === 0 || lr.height > 40) return null;
+
+    const sizeOk = (r) => r.width >= MIN_WIDTH && r.height >= MIN_HEIGHT &&
+        r.height <= Math.max(1000, window.innerHeight) && r.width <= window.innerWidth * 0.95;
+    // a container holding several teasers is a list/section, not the ad unit
+    const multiUnit = (c) => c.querySelectorAll("article").length > 1 ||
+        (c.tagName !== "ARTICLE" && c.querySelectorAll("article").length === 1 && !c.querySelector("article").contains(label));
+
+    const unit = label.closest("article, li, .card, .teaser, [class*='Teaser_teaser'], .feed-item, .result");
+    if (unit && unit !== label) {
+        const r = unit.getBoundingClientRect();
+        if (sizeOk(r) && !multiUnit(unit)) return unit;
+    }
+
+    let p = label.parentElement;
+    for (let depth = 0; p && p !== document.body && depth < 6; depth++, p = p.parentElement) {
+        const r = p.getBoundingClientRect();
+        if (r.height > Math.max(1000, window.innerHeight) || multiUnit(p)) return null;
+        if (sizeOk(r) && r.height >= lr.height * 3) return p;
+    }
+    return null;
 }
 
 function isInComments(el){ return !!el.closest('#comments, ytd-comments, ytd-comment-thread-renderer, ytd-comment-view-model, ytd-item-section-renderer[section-identifier="comments-entry-point"], .comment, .comments, [role="comments"]'); }
@@ -587,6 +834,9 @@ function showToast(text, duration=1400) {
     const host = hostnameOf(location.href);
     if (!settings.enabled || (settings.whitelist || []).includes(host)) return;
 
+    // version marker: shows which build is actually running on a page (DevTools: <html data-catblocker>)
+    try { if (window === window.top) document.documentElement.setAttribute("data-catblocker", chrome.runtime.getManifest().version); } catch {}
+
     injectCatblockerStylesOnce();
     injectSiteCosmeticCssOnce();
     if (isYouTubeSite()) startYouTubeAdBlocking();
@@ -598,6 +848,7 @@ function showToast(text, duration=1400) {
 ================================ */
 function startReplacement() {
     scheduleScan();
+    armSlotFill();
     document.addEventListener("DOMContentLoaded", () => scheduleScan(), { once: true });
 
     observer = new MutationObserver((mutations) => {
@@ -646,11 +897,13 @@ function ensureIO() {
             io.unobserve(e.target);
             visible.push(e.target);
         }
+        cbLog("io:", entries.length, "entries,", visible.length, "visible", visible.map(cbDesc));
         if (visible.length) processBatch(visible);
     }, { root: null, rootMargin: "200px 0px", threshold: 0.01 });
 }
 
 function processBatch(nodes) {
+    cbLog("processBatch", nodes?.length, "alive=", alive, "totalReplaced=", totalReplaced);
     if (!nodes || !nodes.length || !alive) return;
     const work = [...nodes];
 
@@ -712,6 +965,13 @@ async function scanAndReplace() {
         try { queueRedditAds(); } catch {}
     }
 
+    // Known ad slots (G+J / RTL …): replace filled slots, collapse empty ones
+    if (!isYouTubeSite()) {
+        try { queueKnownAdSlots(); } catch {}
+        try { fillEmptyAdSlots(); } catch {}
+        try { collapseEmptyAdSlots(); } catch {}
+    }
+
     // 1) iframe-based ads (dynamic selector)
     try {
         document.querySelectorAll(adIframeSelector).forEach(el => {
@@ -720,6 +980,10 @@ async function scanAndReplace() {
             if (inHeaderArea(el) || inGenericUiArea(el)) return;
             if (isYouTubePlayerSubtree(el)) return;
             if (isYouTubeSite() && isInYouTubeUi(el)) return;
+            // invisible/tiny iframes (sync/tracking frames, not yet rendered slots) would become
+            // a min-size 100×80 cat → skip; they are re-checked on later scans once they grow
+            const r = el.getBoundingClientRect();
+            if (r.width < MIN_WIDTH || r.height < MIN_HEIGHT) return;
             if (isLikelyInterstitial(el)) { neutralizeOverlay(el); return; }
             markCandidate(el);
         });
@@ -785,7 +1049,25 @@ async function scanAndReplace() {
 
             const txt = (el.textContent || "").trim().toLowerCase();
             if (!txt) return;
-            if (["sponsored","promoted","anzeige","werbung","ad"].some(w => txt === w || txt.startsWith(w + " "))) {
+
+            // Exact label ("Anzeige", "Sponsored", …): the label itself is the signal →
+            // replace the labelled unit directly, without the score gate
+            if (txt.length <= 20 && AD_LABEL_WORDS.includes(txt)) {
+                if (isRedditSite() && isInRedditAd(el)) return;
+                if (isInVideoPlayer(el)) return;
+                const unit = findLabeledAdContainer(el);
+                if (unit && !unit.__catblockerProcessed && !unit.__cbGateSeen &&
+                    !unit.closest(".catblocker-container") &&
+                    !inHeaderArea(unit) && !inGenericUiArea(unit) && !__cb_hasSafeExclusion(unit)) {
+                    unit.__cbGateSeen = true;
+                    unit.__cbExactTarget = true;
+                    pendingNodes.add(unit);
+                }
+                return;
+            }
+
+            if (["sponsored","promoted","anzeige","werbung","ad"].some(w => txt.startsWith(w + " "))) {
+                if (isInVideoPlayer(el)) return;
                 const container = el.closest("article, li, ytd-rich-item-renderer, ytd-video-renderer, .feed-item, .card, .result, section, div");
                 if (container && !container.__catblockerProcessed && !inHeaderArea(container) && !inGenericUiArea(container)) {
                     if (isYouTubeSite() && isInYouTubeUi(container)) return;
@@ -868,7 +1150,10 @@ async function scanAndReplace() {
 
 
     // send candidates to IO (visible-only processing)
-    for (const el of pendingNodes) io.observe(el);
+    if (pendingNodes.size) cbLog("scan: queue", pendingNodes.size, Array.from(pendingNodes).map(cbDesc));
+    for (const el of pendingNodes) {
+        try { io.observe(el); } catch (e) { cbLog("io.observe failed", cbDesc(el), e); }
+    }
     pendingNodes.clear();
 
     if (!alive) { scanBusy = false; return; }
@@ -960,6 +1245,8 @@ function markCandidate(el) {
     if (el.__cbGateSeen) return; // avoid repeated scoring of the same node
     // inside a known Reddit ad: the whole slot is replaced by queueRedditAds()
     if (isInRedditAd(el)) { el.__cbGateSeen = true; return; }
+    // known ad slot that already got its cat (fillEmptyAdSlots) or was collapsed
+    if (el.closest(".catblocker-slot") || el.querySelector(".catblocker-slot")) { el.__cbGateSeen = true; return; }
 
     // Safe exclusions first
     if (__cb_hasSafeExclusion(el)) { el.__cbGateSeen = true; return; }
@@ -1019,7 +1306,9 @@ function chooseReplacementTarget(node) {
 async function replaceNodeWithCat(node, opts = {}) {
     const force = true;
     try {
-        if (!alive || node.__catblockerProcessed) return;
+        if (!alive || node.__catblockerProcessed) { cbLog("replace: skip (alive/processed)", alive, cbDesc(node)); return; }
+        // already removed, e.g. its ancestor was replaced with a cat first
+        if (!node.isConnected) { node.__catblockerProcessed = true; cbLog("replace: skip (disconnected)", cbDesc(node)); return; }
 
         // never replace interstitials (we neutralize instead)
         if (!force && isLikelyInterstitial(node)) {
@@ -1031,8 +1320,8 @@ async function replaceNodeWithCat(node, opts = {}) {
         node.__catblockerProcessed = true;
 
         let catUrl = "";
-        try { catUrl = await pickCatSrc(); } catch { return; }
-        if (!alive) return;
+        try { catUrl = await pickCatSrc(); } catch (e) { cbLog("replace: pickCatSrc failed", e); return; }
+        if (!alive) { cbLog("replace: not alive after pickCatSrc"); return; }
 
         const target = node.__cbExactTarget ? node : chooseReplacementTarget(node);
         const rect = target.getBoundingClientRect(); // statt node
@@ -1229,6 +1518,8 @@ async function replaceNodeWithCat(node, opts = {}) {
         container.style.setProperty("box-sizing", "border-box", "important");
 // Für Inline-Layouts: kein 100%-Breitziehen erzwingen
         if (isInlineish) container.style.removeProperty("max-width");
+        // cat in an empty ad slot: centered like the ad would be
+        if (node.__cbSlotFill) container.style.setProperty("margin", "0 auto", "important");
 
         scrubSiblingAnchors(container, typeof buildDomainRegexFromSettings === "function"
             ? buildDomainRegexFromSettings(settings) : null);
@@ -1269,7 +1560,8 @@ async function replaceNodeWithCat(node, opts = {}) {
 
 
         if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
-    } catch { /* swallow node errors */ }
+        cbLog("replace: done", cbDesc(node));
+    } catch (e) { cbLog("replace: error", cbDesc(node), e); /* swallow node errors */ }
 }
 
 /* ================================
