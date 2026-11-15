@@ -38,6 +38,7 @@ function teardown() {
     try { observer && observer.disconnect(); } catch {}
     try { io && io.disconnect && io.disconnect(); } catch {}
     try { pendingNodes && pendingNodes.clear && pendingNodes.clear(); } catch {}
+    try { clearInterval(startYouTubeAdBlocking._t); } catch {}
 }
 
 addEventListener("pagehide", teardown, { once: true });
@@ -176,6 +177,183 @@ const YT_UI_BLOCKLIST = [
 ];
 function isInYouTubeUi(el){ return isYouTubeSite() && YT_UI_BLOCKLIST.some(sel => !!el.closest(sel)); }
 function isYouTubePlayerSubtree(el){ return !!el.closest('#movie_player, .html5-video-player, ytd-player'); }
+/* ================================
+   YouTube ad blocking (uBlock-style)
+   - cosmetic CSS hides feed/sidebar/search ads
+   - skipper fast-forwards any video ad that still plays
+   - youtube/yt_main.js (MAIN world) strips ad data from player responses
+================================ */
+const YT_HIDE_SELECTORS = [
+    // desktop feed / sidebar / search
+    "ytd-ad-slot-renderer",
+    "ytd-rich-item-renderer:has(> #content > ytd-ad-slot-renderer)",
+    "ytd-rich-section-renderer:has(ytd-ad-slot-renderer)",
+    "ytd-item-section-renderer:has(> #contents > ytd-ad-slot-renderer:only-child)",
+    "ytd-in-feed-ad-layout-renderer",
+    "ytd-display-ad-renderer",
+    "ytd-promoted-sparkles-web-renderer",
+    "ytd-promoted-video-renderer",
+    "ytd-promoted-item-renderer",
+    "ytd-search-pyv-renderer",
+    "ytd-banner-promo-renderer",
+    "ytd-statement-banner-renderer",
+    "ytd-companion-slot-renderer",
+    "ytd-action-companion-ad-renderer",
+    "ytd-player-legacy-desktop-watch-ads-renderer",
+    "ytd-engagement-panel-section-list-renderer[target-id='engagement-panel-ads']",
+    "#masthead-ad",
+    "#player-ads",
+    // in-player overlays
+    ".ytp-ad-overlay-container",
+    ".ytp-ad-image-overlay",
+    ".ytp-ad-overlay-slot",
+    ".ytp-featured-product",
+    // mobile (m.youtube.com)
+    "ad-slot-renderer",
+    "ytm-promoted-sparkles-web-renderer",
+    "ytm-companion-ad-renderer",
+    "ytm-rich-item-renderer:has(ad-slot-renderer)"
+];
+
+/* Site-specific cosmetic filters (uBlock-style "##" rules): hidden, not replaced.
+   Only YouTube — on all other sites ads are replaced with cats. */
+function siteCosmeticSelectors() {
+    if (isYouTubeSite()) return YT_HIDE_SELECTORS;
+    return null;
+}
+
+function injectSiteCosmeticCssOnce() {
+    const selectors = siteCosmeticSelectors();
+    if (!selectors || document.getElementById("catblocker-site-style")) return;
+    const style = document.createElement("style");
+    style.id = "catblocker-site-style";
+    // One rule per selector: an unsupported selector must not invalidate the others
+    style.textContent = selectors.map(s => `${s} { display: none !important; }`).join("\n");
+    (document.head || document.documentElement).appendChild(style);
+}
+
+/* Count newly hidden elements for the badge (each element only once) */
+function countSiteCosmeticHits() {
+    const selectors = siteCosmeticSelectors();
+    if (!selectors) return;
+    // Only the selectors this browser understands (one bad selector would break a joined list)
+    const valid = countSiteCosmeticHits._valid ||= selectors.filter(s => {
+        try { document.querySelector(s); return true; } catch { return false; }
+    });
+    const joined = valid.join(",");
+    let n = 0;
+    for (const sel of valid) {
+        document.querySelectorAll(sel).forEach(el => {
+            if (el.__catblockerCounted) return;
+            el.__catblockerCounted = true;
+            // count only the outermost match (e.g. article, not also its shreddit-ad-post)
+            if (el.parentElement?.closest(joined)) return;
+            n++;
+        });
+    }
+    if (n) safeSendMessage({ type: "CATBLOCKER_ADD_COUNT", amount: n });
+}
+
+const YT_SKIP_BUTTONS = ".ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-skip-button-slot button";
+let ytAdState = null;   // { video, muted, rate } while we are fast-forwarding an ad
+
+function ytSkipVideoAd() {
+    if (!alive) return;
+    const player = document.querySelector("#movie_player, .html5-video-player");
+    const adShowing = !!player && (player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting"));
+
+    if (!adShowing) {
+        // Ad over: restore what we changed on the (shared) <video> element
+        if (ytAdState) {
+            const { video, muted, rate } = ytAdState;
+            ytAdState = null;
+            try { video.muted = muted; video.playbackRate = rate; } catch {}
+        }
+        return;
+    }
+
+    const video = player.querySelector("video.html5-main-video, video");
+    if (!video) return;
+
+    if (!ytAdState || ytAdState.video !== video) {
+        ytAdState = { video, muted: video.muted, rate: video.playbackRate || 1 };
+        safeSendMessage({ type: "CATBLOCKER_ADD_COUNT", amount: 1 });
+    }
+    try {
+        video.muted = true;
+        video.playbackRate = 16;
+        if (Number.isFinite(video.duration) && video.duration > 0 && video.currentTime < video.duration - 0.2) {
+            video.currentTime = video.duration - 0.1;
+        }
+    } catch {}
+    document.querySelectorAll(YT_SKIP_BUTTONS).forEach(btn => { try { btn.click(); } catch {} });
+}
+
+function startYouTubeAdBlocking() {
+    if (startYouTubeAdBlocking._t) return;
+    startYouTubeAdBlocking._t = setInterval(ytSkipVideoAd, 250);
+
+    // Counter for ads pruned by youtube/yt_main.js
+    window.addEventListener("message", (e) => {
+        if (e.source !== window || e.data?.source !== "catblocker-yt") return;
+        if (e.data.type === "ads-pruned") safeSendMessage({ type: "CATBLOCKER_ADD_COUNT", amount: 1 });
+    });
+}
+
+/* ================================
+   Reddit: known ad elements → replaced with cats
+   (new reddit "shreddit" web components + old.reddit.com)
+================================ */
+const REDDIT_AD_SELECTORS = [
+    // new reddit: feed (article wraps the ad post → replace the whole article)
+    "article:has(> shreddit-ad-post)",
+    "shreddit-ad-post",
+    // comments page / sidebar
+    "shreddit-comments-page-ad",
+    "shreddit-comment-tree-ad",
+    "shreddit-sidebar-ad",
+    "shreddit-dynamic-ad-link",
+    "shreddit-post[promoted]",
+    "[data-testid='ad-unit']",
+    // old reddit
+    ".promotedlink",
+    ".ad-container",
+    "#ad_main",
+    ".sponsorshipbox"
+];
+
+function isRedditSite() {
+    const h = location.hostname.replace(/^www\./, "");
+    return h === "reddit.com" || h.endsWith(".reddit.com");
+}
+
+function redditAdSelectorJoined() {
+    // filter out selectors this browser can't parse (one bad one would break the list)
+    return redditAdSelectorJoined._s ||= REDDIT_AD_SELECTORS.filter(s => {
+        try { document.querySelector(s); return true; } catch { return false; }
+    }).join(",");
+}
+
+function isInRedditAd(el) {
+    if (!isRedditSite()) return false;
+    const joined = redditAdSelectorJoined();
+    return !!(joined && el.closest(joined));
+}
+
+/* Queue the outermost known ad elements for cat replacement (no score gate) */
+function queueRedditAds() {
+    const joined = redditAdSelectorJoined();
+    if (!joined) return;
+    document.querySelectorAll(joined).forEach(el => {
+        if (el.__catblockerProcessed || el.__cbGateSeen) return;
+        if (el.closest(".catblocker-container")) return;
+        if (el.parentElement?.closest(joined)) return;   // an ancestor is the ad slot
+        el.__cbGateSeen = true;
+        el.__cbExactTarget = true;                       // replace exactly this element
+        pendingNodes.add(el);
+    });
+}
+
 function isInComments(el){ return !!el.closest('#comments, ytd-comments, ytd-comment-thread-renderer, ytd-comment-view-model, ytd-item-section-renderer[section-identifier="comments-entry-point"], .comment, .comments, [role="comments"]'); }
 
 /* ================================
@@ -410,6 +588,8 @@ function showToast(text, duration=1400) {
     if (!settings.enabled || (settings.whitelist || []).includes(host)) return;
 
     injectCatblockerStylesOnce();
+    injectSiteCosmeticCssOnce();
+    if (isYouTubeSite()) startYouTubeAdBlocking();
     startReplacement();
 })();
 
@@ -519,30 +699,17 @@ async function scanAndReplace() {
 
     try { detectAndHideInterstitials(DOMAIN_RE, adIframeSelector); } catch {}
 
-    // YOUTUBE: only explicit ad renderers; never core UI
+    // YOUTUBE: feed/sidebar ads are hidden via CSS (startYouTubeAdBlocking), video ads are
+    // pruned/skipped. Here we only check the skipper on DOM changes for a faster reaction.
     if (isYouTubeSite()) {
-        try {
-            document.querySelectorAll(".video-ads, .ytp-ad-player-overlay, .ytp-ad-text, .ytp-ad-overlay-container, .ytp-ad-image-overlay, .ytp-ad-module")
-                .forEach(node => { if (!node.__catblockerProcessed) hideNode(node); });
-            const skipParent = document.querySelector(".ytp-ad-skip-button-container, .ytp-ad-skip-button, .ytp-ad-skip-button-modern");
-            if (skipParent && !skipParent.__catblockerProcessed) hideNode(skipParent);
+        try { ytSkipVideoAd(); } catch {}
+    }
+    // YouTube: ads are hidden via CSS → count them for the badge
+    try { countSiteCosmeticHits(); } catch {}
 
-            document.querySelectorAll([
-                "ytd-ad-slot-renderer",
-                "ytd-display-ad-renderer",
-                "ytd-in-feed-ad-layout-renderer",
-                "ytd-promoted-video-renderer",
-                "ytd-promoted-sparkles-web-renderer",
-                "ytd-promoted-item-renderer",
-                "ytd-ad-inline-playback-renderer",
-                "ytd-player-legacy-desktop-watch-ads-renderer"
-            ].join(",")).forEach(el => {
-                if (el.__catblockerProcessed) return;
-                if (isInYouTubeUi(el)) return;
-                if (isLikelyInterstitial(el)) { neutralizeOverlay(el); return; }
-                markCandidate(el);
-            });
-        } catch {}
+    // REDDIT: known ad elements are replaced with cats
+    if (isRedditSite()) {
+        try { queueRedditAds(); } catch {}
     }
 
     // 1) iframe-based ads (dynamic selector)
@@ -791,6 +958,8 @@ function markCandidate(el) {
     if (totalReplaced >= MAX_PER_PAGE) return;
     if (!el || el.__catblockerProcessed) return;
     if (el.__cbGateSeen) return; // avoid repeated scoring of the same node
+    // inside a known Reddit ad: the whole slot is replaced by queueRedditAds()
+    if (isInRedditAd(el)) { el.__cbGateSeen = true; return; }
 
     // Safe exclusions first
     if (__cb_hasSafeExclusion(el)) { el.__cbGateSeen = true; return; }
@@ -865,7 +1034,7 @@ async function replaceNodeWithCat(node, opts = {}) {
         try { catUrl = await pickCatSrc(); } catch { return; }
         if (!alive) return;
 
-        const target = chooseReplacementTarget(node);
+        const target = node.__cbExactTarget ? node : chooseReplacementTarget(node);
         const rect = target.getBoundingClientRect(); // statt node
         const vw = window.innerWidth, vh = window.innerHeight;
 

@@ -69,6 +69,9 @@ const PRESETS = {
         "a.adtng.com",
         "trafficjunky.com", "ads.trafficjunky.net",
 
+        // Reddit Ad-Tracking (Promoted-Posts selbst kommen first-party → CSS in content.js)
+        "alb.reddit.com",
+
         // Media.net
         "adservetx.media.net",
         "static.media.net",
@@ -229,6 +232,47 @@ async function syncDynamicRulesFromSettings(settings) {
     }
 }
 
+// ---- YouTube ad pruning (MAIN-world script, registered dynamically so that
+//      the enabled toggle, whitelist and per-host overrides apply to it)
+const YT_SCRIPT_ID = "catblocker-yt-main";
+const YT_MATCHES = ["*://*.youtube.com/*", "*://*.youtube-nocookie.com/*"];
+const YT_HOST_RE = /(^|\.)youtube(-nocookie)?\.com$/;
+
+function ytExcludeMatchesFromSettings(settings) {
+    const hosts = new Set(settings.whitelist || []);
+    Object.entries(settings.overrides || {}).forEach(([h, ov]) => {
+        if (ov && ov.enabled === false) hosts.add(h);
+    });
+    const out = [];
+    hosts.forEach((h) => {
+        h = String(h || "").trim().toLowerCase().replace(/^www\./, "");
+        if (!YT_HOST_RE.test(h) || !/^[a-z0-9.-]+$/.test(h)) return;
+        out.push(`*://${h}/*`, `*://*.${h}/*`);
+    });
+    return out;
+}
+
+async function syncYouTubeScript(settings) {
+    try {
+        const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [YT_SCRIPT_ID] });
+        if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: [YT_SCRIPT_ID] });
+        if (!settings.enabled) return;
+        const excludeMatches = ytExcludeMatchesFromSettings(settings);
+        await chrome.scripting.registerContentScripts([{
+            id: YT_SCRIPT_ID,
+            js: ["youtube/yt_main.js"],
+            matches: YT_MATCHES,
+            ...(excludeMatches.length ? { excludeMatches } : {}),
+            runAt: "document_start",
+            world: "MAIN",
+            allFrames: true,
+            persistAcrossSessions: true
+        }]);
+    } catch (e) {
+        console.warn("[CatBlocker] YouTube script registration failed:", e);
+    }
+}
+
 // ---- Badge
 async function setBadgeCount(n, tabId) {
     try {
@@ -278,6 +322,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     } catch {}
     const s = await getSettings();
     await syncDynamicRulesFromSettings(s);
+    await syncYouTubeScript(s);
 });
 chrome.runtime.onStartup.addListener(async () => {
     const s = await getSettings();
@@ -329,6 +374,7 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
     if (area !== "sync" || !changes.settings) return;
     const s = { ...DEFAULT_SETTINGS, ...(changes.settings.newValue || {}) };
     await syncDynamicRulesFromSettings(s);
+    await syncYouTubeScript(s);
 });
 
 // ---- Messaging
