@@ -172,8 +172,11 @@ function cbPerfSummary(p, label) {
         console.log("elements checked per scan (avg):", avgCounts);
         console.groupEnd();
         // one plain-text line with everything (copy/paste friendly; groups/tables don't survive that)
-        const top = rows.slice(0, 6).map(r => `${r.phase}=${r["total ms"]}ms`).join(", ");
-        console.log(`[CatBlocker perf] ${label} detail · ${cbFrameDesc()} · phases: ${top} · triggers: ${JSON.stringify(p.requests)}` +
+        const isWait = (r) => r.phase.startsWith("wait:");
+        const top = rows.filter(r => !isWait(r)).slice(0, 6).map(r => `${r.phase}=${r["total ms"]}ms`).join(", ");
+        const w = rows.find(isWait);
+        const wait = w ? ` · wait request→scan avg ${w["avg ms"]} / max ${w["max ms"]} ms` : "";
+        console.log(`[CatBlocker perf] ${label} detail · ${cbFrameDesc()} · phases: ${top}${wait} · triggers: ${JSON.stringify(p.requests)}` +
             ` · mutations page/own: ${p.mutationRecords}/${p.selfRecords} · elements/scan: ${JSON.stringify(avgCounts)}`);
     } catch {}
 }
@@ -1091,20 +1094,35 @@ function startReplacement() {
     });
 }
 
-/* Throttled scheduling (avoid scan storms) */
-let lastScanAt = 0;
+/* Throttled scheduling (avoid scan storms), with a guaranteed trailing scan:
+   - at most one scan is pending; further requests are coalesced into it (it sees their changes)
+   - a pending scan is never cancelled
+   - scans run at least SCAN_MIN_INTERVAL_MS apart (measured from when a scan actually ran)
+   The previous version stamped lastScanAt when *scheduling* and cancelled the queued scan on every
+   request within 250 ms → on pages that mutate the DOM continuously the scan kept being pushed back
+   (amazon.de: 277 requests, 3 scans in 10 s) and it spun a requestAnimationFrame retry every frame. */
+const SCAN_MIN_INTERVAL_MS = 250;
+let lastScanAt = -Infinity;      // start of the last scan that ran
+let scanPendingSince = 0;        // 0 = nothing pending, else time of the first coalesced request
+
 function scheduleScan(reason) {
-    // re-scheduled via requestAnimationFrame → called with a timestamp instead of a reason
-    if (cbPerf) cbRequest(typeof reason === "string" ? reason : "throttled retry");
+    if (cbPerf) cbRequest(reason || "?");
+    if (scanPendingSince) return;                // coalesced into the pending scan
     const now = performance.now();
-    if (now - lastScanAt < 250) {
-        if (scheduleScan._t) cancelAnimationFrame(scheduleScan._t);
-        scheduleScan._t = requestAnimationFrame(scheduleScan);
-        return;
-    }
-    lastScanAt = now;
-    if (scheduleScan._t) cancelAnimationFrame(scheduleScan._t);
-    scheduleScan._t = requestAnimationFrame(scanAndReplace);
+    scanPendingSince = now;
+    const wait = Math.max(0, lastScanAt + SCAN_MIN_INTERVAL_MS - now);
+    // rAF: run right before a frame (layout reads are fresh, no extra forced layout); the timer
+    // only enforces the minimum interval
+    const go = () => requestAnimationFrame(runScheduledScan);
+    if (wait > 0) setTimeout(go, wait); else go();
+}
+
+function runScheduledScan() {
+    const requestedAt = scanPendingSince;
+    scanPendingSince = 0;                        // requests from now on schedule the next scan
+    lastScanAt = performance.now();
+    cbPhase("wait: request → scan", requestedAt, false);
+    scanAndReplace();
 }
 
 /* ================================
