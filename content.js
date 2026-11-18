@@ -40,6 +40,7 @@ function teardown(ev) {
     try { io && io.disconnect && io.disconnect(); } catch {}
     try { pendingNodes && pendingNodes.clear && pendingNodes.clear(); } catch {}
     try { clearInterval(startYouTubeAdBlocking._t); } catch {}
+    if (CB_PERF) cbPerfSummary(cbPerf, "final (since load)");
 }
 
 addEventListener("pagehide", teardown, { once: true });
@@ -56,6 +57,136 @@ function cbDesc(el) {
         const r = el.getBoundingClientRect();
         return `${el.tagName}#${el.id || ""}.${String(el.className || "").slice(0, 40)} ${Math.round(r.width)}x${Math.round(r.height)}`;
     } catch { return String(el); }
+}
+
+/* ================================
+   Performance instrumentation (off by default, zero cost when off)
+   Enable per site (no verbose debug logs):  localStorage.setItem("catblocker-perf", "1")  and reload
+   (also active with catblocker-debug, but the debug logs themselves cost time → skews numbers)
+   - per scan: duration per phase + element counts; scans > CB_LONG_SCAN_MS are logged immediately
+   - what requested scans: page mutations, our own DOM writes ("self"), timers, …
+   - summary every CB_PERF_INTERVAL_MS in the console
+   - DevTools Performance panel: "CatBlocker scan" / "CatBlocker replace" in the Timings track
+   - full report: pick the CatBlocker context in the console dropdown and run  cbPerfReport()
+   Note: localStorage is per origin → cross-origin iframes only report if the flag is set there too.
+================================ */
+const CB_PERF = CB_DEBUG || (() => { try { return localStorage.getItem("catblocker-perf") === "1"; } catch { return false; } })();
+const CB_PERF_INTERVAL_MS = 10000;
+const CB_LONG_SCAN_MS = 16;
+
+function cbPerfNew() {
+    return {
+        since: performance.now(),
+        scans: 0, scanMs: 0, scanMax: 0, longScans: 0,
+        phases: {},          // name → { ms, max, n, inScan }
+        counts: {},          // name → summed element counts
+        requests: {},        // scheduleScan reason → n
+        mutationBatches: 0, mutationRecords: 0, selfRecords: 0,
+        replaced: 0
+    };
+}
+let cbPerf = CB_PERF ? cbPerfNew() : null;      // since page load
+let cbPerfWin = CB_PERF ? cbPerfNew() : null;   // current summary window
+let cbCurScan = {};                             // breakdown of the running scan
+
+function cbEach(fn) { if (cbPerf) { fn(cbPerf); fn(cbPerfWin); } }
+function cbT() { return cbPerf ? performance.now() : 0; }
+function cbFrameDesc() {
+    try { return (window === window.top ? "top " : "iframe ") + location.hostname; } catch { return "?"; }
+}
+
+/* add the time since t0 to a phase; returns "now" so phases can be chained */
+function cbPhase(name, t0, inScan = true) {
+    if (!cbPerf) return 0;
+    const now = performance.now(), ms = now - t0;
+    cbEach(p => {
+        const ph = p.phases[name] ||= { ms: 0, max: 0, n: 0, inScan };
+        ph.ms += ms; ph.n++;
+        if (ms > ph.max) ph.max = ms;
+    });
+    if (inScan) cbCurScan[name] = +ms.toFixed(2);
+    return now;
+}
+function cbCount(name, n, inScan = true) {
+    if (!cbPerf) return;
+    cbEach(p => { p.counts[name] = (p.counts[name] || 0) + n; });
+    if (inScan) cbCurScan["#" + name] = n;
+}
+function cbRequest(reason) { cbEach(p => { p.requests[reason] = (p.requests[reason] || 0) + 1; }); }
+
+function cbScanDone(t0) {
+    if (!cbPerf) return;
+    const now = performance.now(), ms = now - t0;
+    cbEach(p => {
+        p.scans++; p.scanMs += ms;
+        if (ms > p.scanMax) p.scanMax = ms;
+        if (ms > CB_LONG_SCAN_MS) p.longScans++;
+    });
+    try { performance.measure("CatBlocker scan", { start: t0, end: now }); } catch {}
+    if (ms > CB_LONG_SCAN_MS) {
+        // plain text (not an object) so it survives copy/paste and log scrapers
+        try { console.log(`[CatBlocker perf] long scan ${ms.toFixed(1)} ms (${cbFrameDesc()}) ${JSON.stringify(cbCurScan)}`); } catch {}
+    }
+    cbCurScan = {};
+}
+
+/* Our own DOM writes (styles, replacements, unlock daemon …) also hit the MutationObserver.
+   Pull those records out right after we wrote, so they are counted as "self" — and still
+   request a scan exactly like the observer would have (behaviour unchanged).
+   Page mutations made in the same task would be counted as "self" too (rare). */
+function cbFlushSelf() {
+    if (!cbPerf || !observer) return;
+    let recs;
+    try { recs = observer.takeRecords(); } catch { return; }
+    if (!recs.length) return;
+    cbEach(p => { p.selfRecords += recs.length; });
+    for (const m of recs) if (m.type === "attributes" && m.target.__cbBgChecked) m.target.__cbBgChecked = false;
+    if (recs.some(mutationTriggersScan)) scheduleScan("self");
+}
+
+function cbPerfSummary(p, label) {
+    if (!p) return;
+    try {
+        const span = performance.now() - p.since;
+        const pct = span ? (p.scanMs / span) * 100 : 0;
+        console.groupCollapsed(
+            `[CatBlocker perf] ${label} · ${cbFrameDesc()} · ${(span / 1000).toFixed(1)} s: ` +
+            `${p.scans} scans, ${p.scanMs.toFixed(0)} ms (${pct.toFixed(1)} % of wall time), ` +
+            `max ${p.scanMax.toFixed(1)} ms, ${p.longScans} > ${CB_LONG_SCAN_MS} ms, ${p.replaced} cats`
+        );
+        console.log("scan requests by trigger:", p.requests);
+        console.log(`mutations: page ${p.mutationBatches} batches / ${p.mutationRecords} records · own ${p.selfRecords} records`);
+        const rows = Object.entries(p.phases)
+            .sort((a, b) => b[1].ms - a[1].ms)
+            .map(([name, ph]) => ({
+                phase: ph.inScan ? name : name + " (outside scan)",
+                "total ms": +ph.ms.toFixed(1),
+                calls: ph.n,
+                "avg ms": +(ph.ms / Math.max(1, ph.n)).toFixed(2),
+                "max ms": +ph.max.toFixed(1),
+                "% of scan time": ph.inScan && p.scanMs ? +((ph.ms / p.scanMs) * 100).toFixed(1) : ""
+            }));
+        console.table(rows);
+        const avgCounts = {};
+        for (const [k, v] of Object.entries(p.counts)) avgCounts[k] = Math.round(v / Math.max(1, p.scans));
+        console.log("elements checked per scan (avg):", avgCounts);
+        console.groupEnd();
+        // one plain-text line with everything (copy/paste friendly; groups/tables don't survive that)
+        const top = rows.slice(0, 6).map(r => `${r.phase}=${r["total ms"]}ms`).join(", ");
+        console.log(`[CatBlocker perf] ${label} detail · ${cbFrameDesc()} · phases: ${top} · triggers: ${JSON.stringify(p.requests)}` +
+            ` · mutations page/own: ${p.mutationRecords}/${p.selfRecords} · elements/scan: ${JSON.stringify(avgCounts)}`);
+    } catch {}
+}
+
+if (CB_PERF) {
+    globalThis.cbPerfReport = () => cbPerfSummary(cbPerf, "since load");
+    globalThis.cbPerfReset = () => { cbPerf = cbPerfNew(); cbPerfWin = cbPerfNew(); };
+    setInterval(() => {
+        if (!alive) return;
+        if (cbPerfWin.scans || cbPerfWin.replaced) cbPerfSummary(cbPerfWin, `last ${CB_PERF_INTERVAL_MS / 1000} s`);
+        cbPerfWin = cbPerfNew();
+        try { performance.clearMeasures("CatBlocker scan"); performance.clearMeasures("CatBlocker replace"); } catch {}
+    }, CB_PERF_INTERVAL_MS);
 }
 
 function safeSendMessage(msg) {
@@ -437,7 +568,7 @@ let slotFillReady = false;
 
 function armSlotFill() {
     if (!knownAdSlotConfigs().length) return;
-    const go = () => setTimeout(() => { slotFillReady = true; scheduleScan(); }, SLOT_FILL_DELAY_MS);
+    const go = () => setTimeout(() => { slotFillReady = true; scheduleScan("slotfill"); }, SLOT_FILL_DELAY_MS);
     if (document.readyState === "complete") go();
     else addEventListener("load", go, { once: true });
 }
@@ -516,7 +647,7 @@ function fillEmptyAdSlots() {
             slot.__cbFilled = true;
             slot.__cbGateSeen = true;
             slot.classList.add("catblocker-slot");             // hides ::before/::after placeholder boxes
-            if (cfg.hide) host.querySelectorAll(cfg.hide).forEach(x => x.style.setProperty("display", "none", "important"));
+            if (cfg.hide) host.querySelectorAll(cfg.hide).forEach(x => setImportant(x, "display", "none"));
 
             // placeholder in ad size → replaced by a cat through the normal pipeline (IO, badge count)
             const ph = document.createElement("div");
@@ -533,11 +664,19 @@ function fillEmptyAdSlots() {
 
 /* Empty, non-fillable ad slot wrappers reserve space (min-height/padding) → collapse them.
    If an ad still renders later, the slot grows again and is replaced by queueKnownAdSlots(). */
+/* Set an inline !important style only if it isn't set already. collapseEmptyAdSlots() runs on
+   every scan; re-setting identical styles still produces "style" mutations → our own observer
+   requested the next scan → endless self-triggered scans while the page is idle. */
+function setImportant(el, prop, value) {
+    if (el.style.getPropertyValue(prop) === value && el.style.getPropertyPriority(prop) === "important") return;
+    el.style.setProperty(prop, value, "important");
+}
+
 function collapseBox(e) {
-    e.classList.add("catblocker-slot");   // also hides ::before/::after placeholders (see catblocker-style)
-    e.style.setProperty("min-height", "0", "important");
-    e.style.setProperty("padding-top", "0", "important");
-    e.style.setProperty("padding-bottom", "0", "important");
+    if (!e.classList.contains("catblocker-slot")) e.classList.add("catblocker-slot");   // also hides ::before/::after placeholders (see catblocker-style)
+    setImportant(e, "min-height", "0px");
+    setImportant(e, "padding-top", "0px");
+    setImportant(e, "padding-bottom", "0px");
 }
 
 function collapseEmptyAdSlots() {
@@ -552,7 +691,7 @@ function collapseEmptyAdSlots() {
             for (const s of slots) {
                 for (let e = s; e && e !== w; e = e.parentElement) collapseBox(e);
             }
-            if (cfg.hide) w.querySelectorAll(cfg.hide).forEach(x => x.style.setProperty("display", "none", "important"));
+            if (cfg.hide) w.querySelectorAll(cfg.hide).forEach(x => setImportant(x, "display", "none"));
         });
     }
 }
@@ -575,6 +714,72 @@ function isInVideoPlayer(el) {
    Prefers the enclosing teaser (article/li/card); otherwise walks up until the
    container is clearly bigger than the label, without swallowing whole page sections. */
 const AD_LABEL_WORDS = ["sponsored", "promoted", "anzeige", "werbung", "ad", "advertisement", "gesponsert"];
+const AD_LABEL_PREFIXES = ["sponsored", "promoted", "anzeige", "werbung", "ad"];   // "Anzeige · …"
+const LABEL_CANDIDATE_SEL = "*[aria-label], [data-testid], span, div, a";
+const LABEL_TEXT_LIMIT = 24;   // > 20 (max exact label length) and > longest "prefix + space"
+const LABEL_SKIP_PARENTS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
+// first letters of all label words (s, p, a, w, g) → cheap pre-filter per text node
+const LABEL_FIRST_CHARS = new Set(AD_LABEL_WORDS.map(w => w.charCodeAt(0)));
+
+function isLabelText(txt) {
+    return (txt.length <= 20 && AD_LABEL_WORDS.includes(txt)) ||
+        AD_LABEL_PREFIXES.some(w => txt.startsWith(w + " "));
+}
+
+/* Start of el.textContent (trimmed, lowercased), without building the whole string:
+   walks the text nodes until LABEL_TEXT_LIMIT non-whitespace-led chars are collected.
+   → { txt, complete, first }  (complete: txt is the whole trimmed text; first: first non-empty text node) */
+function textStart(el) {
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let s = "", first = null;
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+        let d = n.data;
+        if (!s) { d = d.trimStart(); if (!d) continue; first = n; }
+        // cap only against huge nodes (inline scripts …); a short cap could cut off text that
+        // follows a run of whitespace ("Anzeige⏎    …    Partner") and fake an exact label
+        s += d.length > 4096 ? d.slice(0, 4096) : d;
+        // trailing whitespace doesn't count: "Anzeige\n      " is still the complete text "anzeige"
+        if (s.length > LABEL_TEXT_LIMIT && s.trimEnd().length > LABEL_TEXT_LIMIT) {
+            return { txt: s.toLowerCase(), complete: false, first };
+        }
+    }
+    return { txt: s.trimEnd().toLowerCase(), complete: true, first };
+}
+
+/* Label pass: all elements (matching LABEL_CANDIDATE_SEL) whose trimmed textContent is an ad label
+   ("Anzeige") or starts with one ("Anzeige · Partner"). Same result as reading textContent of every
+   span/div/a, but without the quadratic cost (each wrapper's textContent is its whole subtree's text):
+   we look for text nodes that start like a label and only check their ancestors. An ancestor's text
+   can only start with the label if the label node is its first non-empty text node; as soon as that
+   is not the case any more, no higher ancestor qualifies either. */
+function findAdLabelCandidates() {
+    const out = [];
+    const root = document.body || document.documentElement;
+    if (!root) return out;
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+        const parent = n.parentElement;
+        if (!parent || LABEL_SKIP_PARENTS.has(parent.tagName)) continue;
+        const d = n.data;
+        // cheap pre-filter: first non-whitespace char (same whitespace as trim()) must start a label word
+        const i = d.search(/\S/);
+        if (i < 0 || !LABEL_FIRST_CHARS.has(d.charCodeAt(i) | 32)) continue;
+        const head = d.slice(i, i + LABEL_TEXT_LIMIT + 1).toLowerCase();
+        // the node must start like a label: the bare word (may be continued by the next
+        // text node, e.g. <b>Anzeige</b> <span>Partner</span>) or "word …"
+        const headTrim = head.trimEnd();
+        if (!AD_LABEL_WORDS.some(wd => headTrim === wd || head.startsWith(wd + " "))) continue;
+
+        for (let el = parent; el && el !== root && el !== document.documentElement; el = el.parentElement) {
+            const st = textStart(el);
+            if (st.first !== n) break;               // an earlier text node leads → no ancestor qualifies
+            if (!el.matches(LABEL_CANDIDATE_SEL)) continue;
+            // an incomplete start is > 20 chars → only the "word …" prefix rule can match
+            if (isLabelText(st.txt)) out.push({ el, txt: st.txt });
+        }
+    }
+    return out;
+}
 
 function findLabeledAdContainer(label) {
     const lr = label.getBoundingClientRect();
@@ -768,9 +973,11 @@ function removeScrollCaptureUnblockers() {
 
 function startUnlockDaemon(durationMs = 4000) {
     stopUnlockDaemon();
+    const t = cbT();
     const snapshot = captureScrollPos();
     applyTargetedUnlock();
     addScrollCaptureUnblockers();
+    cbPhase("unlock daemon start", t, false);
     // Nach dem Stilwechsel die Scrollpos sofort wiederherstellen
     requestAnimationFrame(() => restoreScrollPos(snapshot));
     unlockTimer = setTimeout(stopUnlockDaemon, durationMs);
@@ -780,6 +987,7 @@ function stopUnlockDaemon() {
     if (unlockTimer) { clearTimeout(unlockTimer); unlockTimer = null; }
     removeScrollCaptureUnblockers();
     revertTargetedUnlock();
+    cbFlushSelf();
 }
 
 
@@ -846,15 +1054,27 @@ function showToast(text, duration=1400) {
 /* ================================
    Core wiring (scan + observe)
 ================================ */
+function mutationTriggersScan(m) {
+    return (m.addedNodes && m.addedNodes.length) || m.type === "attributes";
+}
+
 function startReplacement() {
-    scheduleScan();
+    scheduleScan("init");
     armSlotFill();
-    document.addEventListener("DOMContentLoaded", () => scheduleScan(), { once: true });
+    document.addEventListener("DOMContentLoaded", () => scheduleScan("domcontentloaded"), { once: true });
+
+    // stylesheets/lazy content are in place now → per-element caches start here (see __cbBgChecked)
+    if (document.readyState !== "complete") addEventListener("load", () => scheduleScan("load"), { once: true });
 
     observer = new MutationObserver((mutations) => {
+        cbEach(p => { p.mutationBatches++; p.mutationRecords += mutations.length; });
+        let trigger = false;
         for (const m of mutations) {
-            if ((m.addedNodes && m.addedNodes.length) || m.type === "attributes") { scheduleScan(); break; }
+            // a style/class change may add a background image → check that element again
+            if (m.type === "attributes" && m.target.__cbBgChecked) m.target.__cbBgChecked = false;
+            if (!trigger && mutationTriggersScan(m)) trigger = true;
         }
+        if (trigger) scheduleScan("mutation");
     });
 
     observer.observe(document.documentElement, {
@@ -866,14 +1086,16 @@ function startReplacement() {
 
     chrome.runtime.onMessage.addListener((msg) => {
         if (!alive) return;
-        if (msg?.type === "CATBLOCKER_FORCE_SCAN") scheduleScan();
+        if (msg?.type === "CATBLOCKER_FORCE_SCAN") scheduleScan("message");
         if (msg?.type === "CATBLOCKER_TOAST" && msg.text) showToast(msg.text);
     });
 }
 
 /* Throttled scheduling (avoid scan storms) */
 let lastScanAt = 0;
-function scheduleScan() {
+function scheduleScan(reason) {
+    // re-scheduled via requestAnimationFrame → called with a timestamp instead of a reason
+    if (cbPerf) cbRequest(typeof reason === "string" ? reason : "throttled retry");
     const now = performance.now();
     if (now - lastScanAt < 250) {
         if (scheduleScan._t) cancelAnimationFrame(scheduleScan._t);
@@ -897,7 +1119,8 @@ function ensureIO() {
             io.unobserve(e.target);
             visible.push(e.target);
         }
-        cbLog("io:", entries.length, "entries,", visible.length, "visible", visible.map(cbDesc));
+        if (CB_DEBUG) cbLog("io:", entries.length, "entries,", visible.length, "visible", visible.map(cbDesc));
+        cbCount("io entries (outside scan)", entries.length, false);
         if (visible.length) processBatch(visible);
     }, { root: null, rootMargin: "200px 0px", threshold: 0.01 });
 }
@@ -923,16 +1146,28 @@ function processBatch(nodes) {
 /* ================================
    Scanning & heuristics
 ================================ */
+/* Ad/tracker domain RegExp, rebuilt only when the settings object changes (not per candidate) */
+let _domainRe = null, _domainReFor = null;
+function currentDomainRe() {
+    if (_domainRe && _domainReFor === settings) return _domainRe;
+    _domainReFor = settings;
+    _domainRe = (typeof buildDomainRegexFromSettings === "function")
+        ? buildDomainRegexFromSettings(settings)
+        : /(doubleclick|googlesyndication|adservice|adnxs|taboola|outbrain|revcontent|adsystem|adroll|criteo|adtng|trafficjunky)/i;
+    return _domainRe;
+}
+
 async function scanAndReplace() {
     if (scanBusy) return;
     scanBusy = true;
     if (!alive) { scanBusy = false; return; }
     ensureIO();
+    const tScan = cbT();
+    let t = tScan;
+    cbCurScan = {};
 
     // Build dynamic domain tools from settings (provided by common.js)
-    const DOMAIN_RE = (typeof buildDomainRegexFromSettings === "function")
-        ? buildDomainRegexFromSettings(settings)
-        : /(doubleclick|googlesyndication|adservice|adnxs|taboola|outbrain|revcontent|adsystem|adroll|criteo)/i;
+    const DOMAIN_RE = currentDomainRe();
 
     const adIframeSelector = (typeof buildIframeSelectorFromSettings === "function")
         ? buildIframeSelectorFromSettings(settings)
@@ -949,8 +1184,10 @@ async function scanAndReplace() {
             `iframe[id*="ad"]`,
             `iframe[name*="ad"]`
         ].join(",");
+    t = cbPhase("setup", t);
 
     try { detectAndHideInterstitials(DOMAIN_RE, adIframeSelector); } catch {}
+    t = cbPhase("interstitials", t);
 
     // YOUTUBE: feed/sidebar ads are hidden via CSS (startYouTubeAdBlocking), video ads are
     // pruned/skipped. Here we only check the skipper on DOM changes for a faster reaction.
@@ -959,10 +1196,12 @@ async function scanAndReplace() {
     }
     // YouTube: ads are hidden via CSS → count them for the badge
     try { countSiteCosmeticHits(); } catch {}
+    t = cbPhase("youtube + cosmetic count", t);
 
     // REDDIT: known ad elements are replaced with cats
     if (isRedditSite()) {
         try { queueRedditAds(); } catch {}
+        t = cbPhase("reddit", t);
     }
 
     // Known ad slots (G+J / RTL …): replace filled slots, collapse empty ones
@@ -970,16 +1209,17 @@ async function scanAndReplace() {
         try { queueKnownAdSlots(); } catch {}
         try { fillEmptyAdSlots(); } catch {}
         try { collapseEmptyAdSlots(); } catch {}
+        t = cbPhase("known ad slots", t);
     }
 
     // 1) iframe-based ads (dynamic selector)
     try {
-        document.querySelectorAll(adIframeSelector).forEach(el => {
-            if (el.__catblockerProcessed) return;
+        const adIframes = document.querySelectorAll(adIframeSelector);
+        cbCount("iframes (ad src)", adIframes.length);
+        adIframes.forEach(el => {
+            if (el.__catblockerProcessed || el.__cbGateSeen) return;   // already scored
             if (el.closest('.catblocker-container, .catblocker-dismissed')) return;
-            if (inHeaderArea(el) || inGenericUiArea(el)) return;
-            if (isYouTubePlayerSubtree(el)) return;
-            if (isYouTubeSite() && isInYouTubeUi(el)) return;
+            if (inExcludedArea(el)) return;
             // invisible/tiny iframes (sync/tracking frames, not yet rendered slots) would become
             // a min-size 100×80 cat → skip; they are re-checked on later scans once they grow
             const r = el.getBoundingClientRect();
@@ -988,15 +1228,15 @@ async function scanAndReplace() {
             markCandidate(el);
         });
     } catch {}
+    t = cbPhase("iframes (ad src)", t);
 
     try {
-        document.querySelectorAll('iframe:not([src]), iframe[src=""], iframe[src^="about:blank"], iframe[srcdoc]')
-            .forEach(el => {
-                if (el.__catblockerProcessed) return;
+        const blankIframes = document.querySelectorAll('iframe:not([src]), iframe[src=""], iframe[src^="about:blank"], iframe[srcdoc]');
+        cbCount("iframes (blank/srcdoc)", blankIframes.length);
+        blankIframes.forEach(el => {
+                if (el.__catblockerProcessed || el.__cbGateSeen) return;   // already scored
                 if (el.closest('.catblocker-container, .catblocker-dismissed')) return;
-                if (inHeaderArea(el) || inGenericUiArea(el)) return;
-                if (isYouTubePlayerSubtree(el)) return;
-                if (isYouTubeSite() && isInYouTubeUi(el)) return;
+                if (inExcludedArea(el)) return;
 
                 const r = el.getBoundingClientRect();
                 if (r.width < MIN_WIDTH || r.height < MIN_HEIGHT) return;
@@ -1011,52 +1251,64 @@ async function scanAndReplace() {
                 }
             });
     } catch {}
+    t = cbPhase("iframes (blank/srcdoc)", t);
 
 
     // 2) background-image ads (use DOMAIN_RE)
     try {
+        // Checked elements are remembered (__cbBgChecked) once the page has loaded (before that,
+        // stylesheets may still be missing). Style/class changes reset the mark (MutationObserver).
+        const settled = document.readyState === "complete";
         const bgCandidates = document.querySelectorAll("div, section, aside, a");
+        cbCount("background images", bgCandidates.length);
         for (const el of bgCandidates) {
-            if (el.__catblockerProcessed) continue;
-            if (el.closest('.catblocker-container, .catblocker-dismissed')) continue;
-            if (inHeaderArea(el) || inGenericUiArea(el)) continue;
-            if (isYouTubePlayerSubtree(el)) continue;
-            if (isYouTubeSite() && isInYouTubeUi(el)) continue;
+            if (el.__catblockerProcessed || el.__cbBgChecked) continue;
 
-            const cs = getComputedStyle(el);
-            const bgImg = cs.backgroundImage || "";
-            if (bgImg && bgImg !== 'none') {
-                const r = el.getBoundingClientRect();
-                if (r.width >= 160 && r.height >= 90) {
-                    const hint = bgImg.toLowerCase();
-                    if (DOMAIN_RE.test(hint)) {
-                        if (isLikelyInterstitial(el)) { neutralizeOverlay(el); continue; }
-                        markCandidate(el);
-                    }
-                }
+            // cheap test first: almost all elements have no background image
+            const bgImg = getComputedStyle(el).backgroundImage || "";
+            if (!bgImg || bgImg === 'none' || !DOMAIN_RE.test(bgImg.toLowerCase())) {
+                if (settled) el.__cbBgChecked = true;
+                continue;
+            }
+            if (el.closest('.catblocker-container, .catblocker-dismissed') ||
+                inHeaderArea(el) || inGenericUiArea(el) || isYouTubePlayerSubtree(el) ||
+                (isYouTubeSite() && isInYouTubeUi(el))) {
+                if (settled) el.__cbBgChecked = true;
+                continue;
+            }
+            const r = el.getBoundingClientRect();
+            if (r.width >= 160 && r.height >= 90) {        // smaller ones: re-checked once they grow
+                if (settled) el.__cbBgChecked = true;
+                if (isLikelyInterstitial(el)) { neutralizeOverlay(el); continue; }
+                markCandidate(el);
             }
         }
     } catch {}
+    t = cbPhase("background images", t);
 
     // 3) sponsored / advert labels → replace container (not YT UI/core)
     try {
-        const labelCandidates = document.querySelectorAll("*[aria-label], [data-testid], span, div, a");
-        labelCandidates.forEach(el => {
-            if (el.__catblockerProcessed) return;
-            if (inHeaderArea(el) || inGenericUiArea(el)) return;
-            if (isInComments(el)) return;
-            if (isYouTubeSite() && isInYouTubeUi(el)) return;
-
-            const txt = (el.textContent || "").trim().toLowerCase();
-            if (!txt) return;
+        const labelCandidates = findAdLabelCandidates();
+        cbCount("labels (text)", labelCandidates.length);
+        // A label is "done" (__cbLabelDone = its text) once its outcome is final: excluded area, or
+        // its ad unit was found (queued or already scored). Labels without a unit yet (not rendered,
+        // overlapping a video) are re-checked on later scans. Only cached after load (layout settled).
+        const settled = document.readyState === "complete";
+        const done = (el, txt) => { if (settled) el.__cbLabelDone = txt; };
+        labelCandidates.forEach(({ el, txt }) => {
+            if (el.__catblockerProcessed || el.__cbLabelDone === txt) return;
+            if (inHeaderArea(el) || inGenericUiArea(el) || isInComments(el) ||
+                (isYouTubeSite() && isInYouTubeUi(el))) { done(el, txt); return; }
 
             // Exact label ("Anzeige", "Sponsored", …): the label itself is the signal →
             // replace the labelled unit directly, without the score gate
             if (txt.length <= 20 && AD_LABEL_WORDS.includes(txt)) {
-                if (isRedditSite() && isInRedditAd(el)) return;
+                if (isRedditSite() && isInRedditAd(el)) { done(el, txt); return; }
                 if (isInVideoPlayer(el)) return;
                 const unit = findLabeledAdContainer(el);
-                if (unit && !unit.__catblockerProcessed && !unit.__cbGateSeen &&
+                if (!unit) return;
+                done(el, txt);
+                if (!unit.__catblockerProcessed && !unit.__cbGateSeen &&
                     !unit.closest(".catblocker-container") &&
                     !inHeaderArea(unit) && !inGenericUiArea(unit) && !__cb_hasSafeExclusion(unit)) {
                     unit.__cbGateSeen = true;
@@ -1066,28 +1318,31 @@ async function scanAndReplace() {
                 return;
             }
 
-            if (["sponsored","promoted","anzeige","werbung","ad"].some(w => txt.startsWith(w + " "))) {
+            if (AD_LABEL_PREFIXES.some(w => txt.startsWith(w + " "))) {
                 if (isInVideoPlayer(el)) return;
                 const container = el.closest("article, li, ytd-rich-item-renderer, ytd-video-renderer, .feed-item, .card, .result, section, div");
-                if (container && !container.__catblockerProcessed && !inHeaderArea(container) && !inGenericUiArea(container)) {
-                    if (isYouTubeSite() && isInYouTubeUi(container)) return;
-                    if (isLikelyInterstitial(container)) { neutralizeOverlay(container); return; }
-                    markCandidate(container);
-                }
+                if (!container) return;
+                if (container.__catblockerProcessed || inHeaderArea(container) || inGenericUiArea(container) ||
+                    (isYouTubeSite() && isInYouTubeUi(container))) { done(el, txt); return; }
+                if (isLikelyInterstitial(container)) { neutralizeOverlay(container); done(el, txt); return; }
+                markCandidate(container);
+                // container got scored (markCandidate skips scoring once MAX_PER_PAGE is reached)
+                if (container.__cbGateSeen) done(el, txt);
             }
         });
     } catch {}
+    t = cbPhase("labels (text)", t);
 
     // 4) generic selectors (from settings intensity)
     try {
         const selectors = chooseSelectors(settings.intensity);
         if (selectors && selectors.length) {
-            document.querySelectorAll(selectors.join(",")).forEach(node => {
-                if (node.__catblockerProcessed) return;
+            const genericNodes = document.querySelectorAll(selectors.join(","));
+            cbCount("generic selectors", genericNodes.length);
+            genericNodes.forEach(node => {
+                if (node.__catblockerProcessed || node.__cbGateSeen) return;   // already scored
                 if (node.closest('.catblocker-container')) return;
-                if (isYouTubePlayerSubtree(node)) return;
-                if (inHeaderArea(node) || inGenericUiArea(node)) return;
-                if (isYouTubeSite() && isInYouTubeUi(node)) return;
+                if (inExcludedArea(node)) return;
 
                 const r = node.getBoundingClientRect();
                 if (r.width < MIN_WIDTH || r.height < MIN_HEIGHT) return;
@@ -1096,6 +1351,7 @@ async function scanAndReplace() {
             });
         }
     } catch {}
+    t = cbPhase("generic selectors", t);
 
     // 5) video-based ads (video/source tags)
     try {
@@ -1133,28 +1389,40 @@ async function scanAndReplace() {
             }
         }
     } catch {}
+    t = cbPhase("videos", t);
 
     // 2.5) winzige Tracking-Pixel (<img>)
     try {
         const tinyImgs = document.querySelectorAll("img[src]");
+        cbCount("tracking pixels", tinyImgs.length);
         for (const img of tinyImgs) {
             if (img.__catblockerProcessed) continue;
+            const rawSrc = img.getAttribute("src") || "";
+            if (img.__cbCleanSrc === rawSrc) continue;      // src already known as no tracker
+            const src = rawSrc.toLowerCase();
+            // URL test first (cheap, no layout); size only for tracker-like URLs
+            if (!(DOMAIN_RE.test(src) || /pixel|beacon|track|deep_pixel/.test(src))) {
+                img.__cbCleanSrc = rawSrc;
+                continue;
+            }
             const w = (img.width || img.naturalWidth || 0);
             const h = (img.height || img.naturalHeight || 0);
-            const src = (img.getAttribute("src") || "").toLowerCase();
-            if ((w <= 2 && h <= 2) && (DOMAIN_RE.test(src) || /pixel|beacon|track|deep_pixel/.test(src))) {
-                hideNode(img); // nicht ersetzen, nur unsichtbar machen
-            }
+            if (w <= 2 && h <= 2) hideNode(img); // nicht ersetzen, nur unsichtbar machen
         }
     } catch {}
+    t = cbPhase("tracking pixels", t);
 
 
     // send candidates to IO (visible-only processing)
-    if (pendingNodes.size) cbLog("scan: queue", pendingNodes.size, Array.from(pendingNodes).map(cbDesc));
+    if (CB_DEBUG && pendingNodes.size) cbLog("scan: queue", pendingNodes.size, Array.from(pendingNodes).map(cbDesc));
+    cbCount("queued candidates", pendingNodes.size);
     for (const el of pendingNodes) {
         try { io.observe(el); } catch (e) { cbLog("io.observe failed", cbDesc(el), e); }
     }
     pendingNodes.clear();
+    cbPhase("queue → IO", t);
+    cbScanDone(tScan);
+    cbFlushSelf();
 
     if (!alive) { scanBusy = false; return; }
     scanBusy = false;
@@ -1251,12 +1519,7 @@ function markCandidate(el) {
     // Safe exclusions first
     if (__cb_hasSafeExclusion(el)) { el.__cbGateSeen = true; return; }
 
-    // Compute score (use last built DOMAIN_RE if available via closure in scan)
-    // If not available, fall back to a generic one
-    const DOMAIN_RE = (typeof buildDomainRegexFromSettings === 'function')
-        ? buildDomainRegexFromSettings(settings)
-        : /(doubleclick|googlesyndication|adservice|adnxs|taboola|outbrain|revcontent|adsystem|adroll|criteo|adtng|trafficjunky)/i;
-
+    const DOMAIN_RE = currentDomainRe();
     const score = __cb_computeAdScore(el, DOMAIN_RE);
     const threshold = __cb_getIntensityThreshold(settings.intensity || 'balanced');
 
@@ -1322,6 +1585,7 @@ async function replaceNodeWithCat(node, opts = {}) {
         let catUrl = "";
         try { catUrl = await pickCatSrc(); } catch (e) { cbLog("replace: pickCatSrc failed", e); return; }
         if (!alive) { cbLog("replace: not alive after pickCatSrc"); return; }
+        const tReplace = cbT();
 
         const target = node.__cbExactTarget ? node : chooseReplacementTarget(node);
         const rect = target.getBoundingClientRect(); // statt node
@@ -1521,8 +1785,7 @@ async function replaceNodeWithCat(node, opts = {}) {
         // cat in an empty ad slot: centered like the ad would be
         if (node.__cbSlotFill) container.style.setProperty("margin", "0 auto", "important");
 
-        scrubSiblingAnchors(container, typeof buildDomainRegexFromSettings === "function"
-            ? buildDomainRegexFromSettings(settings) : null);
+        scrubSiblingAnchors(container, currentDomainRe());
 
 
         const anchor = target.closest('a[href]');
@@ -1560,7 +1823,13 @@ async function replaceNodeWithCat(node, opts = {}) {
 
 
         if (!window.__CATBLOCKER_SAFE_MODE__) startUnlockDaemon(3000);
-        cbLog("replace: done", cbDesc(node));
+        if (cbPerf) {
+            cbPhase("replace (per cat)", tReplace, false);
+            cbEach(p => { p.replaced++; });
+            try { performance.measure("CatBlocker replace", { start: tReplace, end: performance.now() }); } catch {}
+            cbFlushSelf();
+        }
+        if (CB_DEBUG) cbLog("replace: done", cbDesc(node));
     } catch (e) { cbLog("replace: error", cbDesc(node), e); /* swallow node errors */ }
 }
 
@@ -1574,6 +1843,15 @@ function inGenericUiArea(el) {
     if (!!el.closest(".sidebar, .toolbar, .modal, .dialog, .cookie, .consent, [role='dialog'], [data-testid='sidebar'], [data-testid='toolbar']")) return true;
     if (isYouTubeSite() && isInYouTubeUi(el)) return true;
     return false;
+}
+/* Header/nav/UI/YouTube-UI exclusion, cached per element once the page has loaded
+   (an element practically never moves into or out of the header later; before load it might). */
+function inExcludedArea(el) {
+    if (el.__cbExcluded !== undefined) return el.__cbExcluded;
+    const v = inHeaderArea(el) || inGenericUiArea(el) || isYouTubePlayerSubtree(el) ||
+        (isYouTubeSite() && isInYouTubeUi(el));
+    if (document.readyState === "complete") el.__cbExcluded = v;
+    return v;
 }
 function hideNode(node) {
     try {
