@@ -169,30 +169,34 @@ const PRESETS = {
 
 
 // ---- DNR helpers
-function ruleIdForString(s) {
-    const h = Math.abs([...String(s)].reduce((a, c) => ((a << 5) - a) + c.charCodeAt(0), 0));
-    return 10000 + (h % 5000);
+// One block rule + one allow rule, matched by domain (requestDomains = the domain and its
+// subdomains). Previously every entry was its own rule with `urlFilter: entry`, i.e. a plain
+// substring match anywhere in the URL ("media.net" also hit "socialmedia.net/…" or
+// "?ref=media.net"), and rule IDs came from a hash into 5000 slots — one collision made
+// updateDynamicRules throw and left NO rules active.
+const DNR_RULE_ID_MIN = 10000, DNR_RULE_ID_MAX = 14999;   // our range (old per-entry rules included)
+const DNR_BLOCK_RULE_ID = 10000;
+const DNR_ALLOW_RULE_ID = 10001;
+const DNR_RESOURCE_TYPES = ["script", "xmlhttprequest", "sub_frame", "image", "media", "font"];
+
+/* Settings entry → domain for requestDomains, or null if unusable. The options page stores bare
+   hostnames already; this is defensive for older/imported values ("https://x.com/path", "*.x.com",
+   "||x.com^", IDN). One invalid entry would make updateDynamicRules reject the whole update. */
+function toRequestDomain(v) {
+    let s = String(v || "").trim().toLowerCase();
+    if (!s) return null;
+    s = s.replace(/^\|\|/, "").replace(/^[a-z][a-z0-9+.-]*:\/\//, "").replace(/^\*\./, "")
+         .replace(/[\/?#^:].*$/, "").replace(/\.$/, "");
+    try { s = new URL("http://" + s).hostname; } catch { return null; }   // IDN → punycode
+    return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/.test(s) ? s : null;
 }
-function buildBlockRule(hostOrFragment) {
+
+function buildDomainRule(id, type, priority, entries) {
+    const domains = [...new Set([...entries].map(toRequestDomain).filter(Boolean))].sort();
+    if (!domains.length) return null;
     return {
-        id: ruleIdForString("BLK:" + hostOrFragment),
-        priority: 1,
-        action: { type: "block" },
-        condition: {
-            urlFilter: hostOrFragment,
-            resourceTypes: ["script","xmlhttprequest","sub_frame","image","media","font"]
-        }
-    };
-}
-function buildAllowRule(hostOrFragment) {
-    return {
-        id: ruleIdForString("ALW:" + hostOrFragment),
-        priority: 10, // must be higher than block to win
-        action: { type: "allow" },
-        condition: {
-            urlFilter: hostOrFragment,
-            resourceTypes: ["script","xmlhttprequest","sub_frame","image","media","font"]
-        }
+        id, priority, action: { type },
+        condition: { requestDomains: domains, resourceTypes: DNR_RESOURCE_TYPES }
     };
 }
 
@@ -213,22 +217,24 @@ async function syncDynamicRulesFromSettings(settings) {
     const allowList = new Set(settings.allowDomains || []);
     blockList.forEach(d => domains.add(d));
 
-    const blockRules = [...domains].map(buildBlockRule);
-    const allowRules = [...allowList].map(buildAllowRule);
-    const desiredRules = blockRules.concat(allowRules);
+    const desiredRules = [
+        buildDomainRule(DNR_BLOCK_RULE_ID, "block", 1, domains),
+        buildDomainRule(DNR_ALLOW_RULE_ID, "allow", 10, allowList)   // priority must beat block
+    ].filter(Boolean);
 
     try {
         const existing = await chrome.declarativeNetRequest.getDynamicRules();
         const removeIds = existing
             .map(r => r.id)
-            .filter(id => id >= 10000 && id < 15000);
+            .filter(id => id >= DNR_RULE_ID_MIN && id <= DNR_RULE_ID_MAX);
 
         await chrome.declarativeNetRequest.updateDynamicRules({
             removeRuleIds: removeIds,
             addRules: desiredRules
         });
     } catch (e) {
-        // Falls Permission fehlt: still und leise.
+        // no longer silent: a failed update means no network blocking at all
+        console.warn("[CatBlocker] updateDynamicRules failed:", e);
     }
 }
 
